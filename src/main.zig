@@ -14,10 +14,12 @@
 //!   cairn forget <id>
 
 const std = @import("std");
+const sdk = @import("zig_mcp_sdk");
 const embedder = @import("embedder.zig");
 const daemon = @import("daemon.zig");
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
+const mcp = @import("mcp.zig");
 
 const Client = client_mod.Client;
 const Request = protocol.Request;
@@ -52,6 +54,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "daemon")) {
         return daemon.run(allocator, io, cfg);
     }
+    if (std.mem.eql(u8, cmd, "mcp")) {
+        return runMcp(allocator, io, env, cfg);
+    }
 
     const req = buildRequest(cmd, args) catch |err| {
         fatal("{s}", .{@errorName(err)});
@@ -62,14 +67,46 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
 
     var client: Client = undefined;
-    client.init(allocator, io, cfg.socket_path) catch {
-        fatal("could not reach the cairn daemon at {s} (start it with `cairn daemon`)", .{cfg.socket_path});
+    client.connectOrStart(allocator, io, cfg.socket_path) catch {
+        fatal("could not reach or start the cairn daemon at {s}", .{cfg.socket_path});
     };
     defer client.deinit();
 
     const parsed = try client.call(a, req);
     try printResponse(io, parsed.value);
     if (!parsed.value.ok) std.process.exit(1);
+}
+
+/// Run the MCP bridge over stdio as a thin client of the daemon (auto-started
+/// if needed). Claude Code launches this with `command: cairn mcp`.
+fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: daemon.Config) !void {
+    var client: Client = undefined;
+    try client.connectOrStart(allocator, io, cfg.socket_path);
+    defer client.deinit();
+
+    var handler: mcp.Handler = .{
+        .client = &client,
+        .default_scope = try defaultScope(allocator, io, env),
+        .author = env.get("CAIRN_AUTHOR") orelse "claude-code",
+    };
+    var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
+        .server_info = .{ .name = "cairn", .version = "0.0.0" },
+        .capabilities = .{ .tools = .{} },
+        .instructions =
+            \\Shared working-state for this project. Record decisions, findings,
+            \\rejected paths, and todos so later sessions and sub-agents don't
+            \\re-derive them; recall them before re-investigating something.
+        ,
+    });
+    try server.start(io);
+}
+
+/// The default scope tools use when none is given: an explicit CAIRN_SCOPE, or
+/// one derived from the working directory the bridge was launched in.
+fn defaultScope(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) ![]const u8 {
+    if (env.get("CAIRN_SCOPE")) |s| return s;
+    const cwd = std.process.currentPathAlloc(io, allocator) catch return "";
+    return std.fmt.allocPrint(allocator, "repo:{s}", .{cwd});
 }
 
 fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {

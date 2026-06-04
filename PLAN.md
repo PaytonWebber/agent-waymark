@@ -75,9 +75,10 @@ chain the incumbents flatten into embeddings.
    snapshot persistence; the internal protocol codec; the `cairnd` unix-socket
    daemon that owns one Store; a thin client; a `cairn` CLI exercising it.
    Tests: store ops and protocol codec offline; a scripted socket smoke.
-2. **MCP bridge.** Repoint the existing comptime-schema MCP server (from
-   zig-agentic-memory) at the daemon. Tools: `record`, `recall`, `timeline`,
-   `supersede`. Standard stdio `command` config for Claude Code.
+2. **MCP bridge.** [done] Comptime-schema MCP server as a thin daemon client.
+   Tools: `record`, `recall`, `timeline`, `supersede`. Auto-starts the daemon;
+   defaults each tool's scope to the launch directory. Standard stdio `command`
+   config for Claude Code (`cairn mcp`).
 3. **Hook kit + installer.** `SessionStart` injects the scope header;
    `UserPromptSubmit` injects semantic recall for the prompt; `PreCompact`
    flushes in-flight decisions; `SubagentStart` seeds the sub-agent. One-command

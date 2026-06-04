@@ -24,6 +24,32 @@ pub const Client = struct {
     pub fn init(self: *Client, allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
         const addr = try net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
+        try self.finish(allocator, io, stream);
+    }
+
+    /// Connect, or spawn the daemon (`<self> daemon`, inheriting our environment
+    /// so it picks up the same CAIRN_* config) and connect once it is up. This
+    /// is what makes the MCP bridge and the hooks "just work" without the user
+    /// starting a daemon by hand.
+    pub fn connectOrStart(self: *Client, allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
+        const addr = try net.UnixAddress.init(socket_path);
+        if (addr.connect(io)) |stream| {
+            return self.finish(allocator, io, stream);
+        } else |_| {}
+
+        try spawnDaemon(allocator, io);
+
+        var tries: usize = 0;
+        while (tries < 100) : (tries += 1) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+            if (addr.connect(io)) |stream| {
+                return self.finish(allocator, io, stream);
+            } else |_| {}
+        }
+        return error.DaemonUnreachable;
+    }
+
+    fn finish(self: *Client, allocator: Allocator, io: std.Io, stream: net.Stream) !void {
         const rbuf = try allocator.alloc(u8, buffer_size);
         errdefer allocator.free(rbuf);
         const wbuf = try allocator.alloc(u8, buffer_size);
@@ -54,3 +80,17 @@ pub const Client = struct {
         return protocol.readLine(Response, arena, &self.reader.interface);
     }
 };
+
+/// Spawn `<self-exe> daemon` detached, inheriting the current environment. The
+/// child outlives this process and is shared by every other client.
+fn spawnDaemon(allocator: Allocator, io: std.Io) !void {
+    const exe = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe);
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ exe, "daemon" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    _ = &child; // detached: do not wait
+}

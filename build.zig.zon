@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .quantal = .{ .path = "../quantajump" },
+        .zig_mcp_sdk = .{ .path = "../zig-mcp-sdk" },
     },
     .paths = .{
         "build.zig",

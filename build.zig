@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(usize, "dim", dim);
 
     const quantal = b.dependency("quantal", .{ .target = target, .optimize = optimize });
+    const sdk = b.dependency("zig_mcp_sdk", .{ .target = target, .optimize = optimize });
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -19,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "quantal", .module = quantal.module("quantal") },
+            .{ .name = "zig_mcp_sdk", .module = sdk.module("zig_mcp_sdk") },
             .{ .name = "build_options", .module = options.createModule() },
         },
     });

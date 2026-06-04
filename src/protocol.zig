@@ -75,9 +75,13 @@ pub fn writeLine(allocator: std.mem.Allocator, w: *std.Io.Writer, value: anytype
 
 /// Read one JSON line and parse it into `T`. The returned `Parsed(T)` owns its
 /// allocations; the caller deinits it (or uses an arena and ignores deinit).
+///
+/// Uses the inclusive delimiter read so the trailing newline is consumed from
+/// the buffer; the exclusive variant leaves it behind, jamming the next read on
+/// an empty line. A clean client disconnect surfaces as `error.EndOfStream`.
 pub fn readLine(comptime T: type, allocator: std.mem.Allocator, r: *std.Io.Reader) !std.json.Parsed(T) {
-    const line = try r.takeDelimiterExclusive('\n');
-    return std.json.parseFromSlice(T, allocator, line, .{ .ignore_unknown_fields = true });
+    const line = try r.takeDelimiterInclusive('\n');
+    return std.json.parseFromSlice(T, allocator, line[0 .. line.len - 1], .{ .ignore_unknown_fields = true });
 }
 
 test "request round-trips through the line codec" {

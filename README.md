@@ -28,25 +28,38 @@ See [PLAN.md](PLAN.md) for the architecture and roadmap.
 
 ## Status
 
-Phase 1 (daemon + store + protocol + CLI) is in. Built on
-[quantal](../quantajump) for the vector index and a local
+Phases 1–2 are in: the daemon + store + protocol + CLI, and the MCP bridge.
+Built on [quantal](../quantajump) for the vector index and a local
 [Ollama](https://ollama.com) model for embeddings.
 
 ```bash
 zig build                         # build the `cairn` binary
 zig build test                    # unit tests (offline, no Ollama)
 
-cairn daemon &                    # start the store owner
+# CLI (any subcommand auto-starts the daemon if it isn't running):
 cairn record decision "use a daemon to own the store" --scope repo:x@main
 cairn recall  "who owns the store?" --scope repo:x@main
 cairn timeline --scope repo:x@main
 cairn header   --scope repo:x@main      # the always-on session summary
 ```
 
-`CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL` configure
-the socket path, snapshot path, and embedding endpoint/model.
+### Use with Claude Code
 
-Next: the MCP bridge (phase 2) and the hook kit (phase 3).
+```bash
+zig build
+claude mcp add --transport stdio cairn -- $(pwd)/zig-out/bin/cairn mcp
+```
+
+The bridge exposes `record`, `recall`, `timeline`, and `supersede`, auto-starts
+the daemon, and defaults each tool's scope to the project it was launched in.
+Automatic context injection (the part a tool-only server can't do) arrives with
+the hook kit in phase 3.
+
+`CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`, `CAIRN_SCOPE`,
+and `CAIRN_AUTHOR` configure the socket/snapshot paths, embedding endpoint/model,
+the default scope, and the author tag.
+
+Next: the hook kit (phase 3) — the headline.
 
 ## License
 
