@@ -97,12 +97,14 @@ worktrees of one repo share it). Within a repo, scope is hierarchical:
   live.
 - **Branch-local** (`repo:<root>/branch/<name>`) is opt-in (`--branch-local`, or
   the `branch_local` tool arg) for work specific to a feature branch. It shows
-  only on that branch; the trunk (`main`/`master`) and other branches don't see
-  it.
+  only on that branch; the default branch and other branches don't see it, and
+  it's flagged `[branch]` in the header.
 
 Reads run at the current branch and return repo-wide plus current-branch
-entries. Outside a git repo, everything is repo-wide for that directory.
-`CAIRN_SCOPE` overrides detection with a fixed scope.
+entries. The default branch (detected from the remote's `origin/HEAD`, falling
+back to `main`/`master` for local-only repos) is treated as repo-wide. Outside a
+git repo, everything is repo-wide for that directory. `CAIRN_SCOPE` overrides
+detection with a fixed scope.
 
 ### CLI
 
