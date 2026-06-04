@@ -73,6 +73,11 @@ const SupersedeArgs = struct {
     };
 };
 
+const DoneArgs = struct {
+    id: i64,
+    pub const descriptions = .{ .id = "Id of the todo (or entry) to mark done." };
+};
+
 pub const Handler = struct {
     client: *Client,
     default_scope: []const u8,
@@ -103,6 +108,11 @@ pub const Handler = struct {
                     .description = "Replace an earlier entry with a new one, preserving the chain (e.g. a decision that changed).",
                     .inputSchema = comptime types.schemaForStruct(SupersedeArgs),
                 },
+                .{
+                    .name = "done",
+                    .description = "Mark a todo done so it drops out of the session header. Kept for history.",
+                    .inputSchema = comptime types.schemaForStruct(DoneArgs),
+                },
             },
         };
     }
@@ -112,7 +122,16 @@ pub const Handler = struct {
         if (std.mem.eql(u8, params.name, "recall")) return self.recall(a, params);
         if (std.mem.eql(u8, params.name, "timeline")) return self.timeline(a, params);
         if (std.mem.eql(u8, params.name, "supersede")) return self.supersede(a, params);
+        if (std.mem.eql(u8, params.name, "done")) return self.done(a, params);
         return error.ToolNotFound;
+    }
+
+    fn done(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
+        const args = try types.parseArgs(DoneArgs, a, params.arguments);
+        if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
+        const parsed = self.client.call(a, .{ .op = "done", .id = @intCast(args.id) }) catch return daemonDown(a);
+        if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "done failed");
+        return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "Marked #{d} done.", .{args.id}));
     }
 
     fn record(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {

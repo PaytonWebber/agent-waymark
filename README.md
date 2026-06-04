@@ -71,14 +71,15 @@ cairn record decision "use a daemon to own the store"
 cairn recall  "who owns the store?"
 cairn timeline
 cairn header                        # the always-on session summary
+cairn done <id>                     # finish a todo (kept for history)
 ```
 
 `CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`, `CAIRN_SCOPE`,
 and `CAIRN_AUTHOR` configure the socket/snapshot paths, embedding endpoint/model,
 the default scope, and the author tag.
 
-Next: phase 4 (git-repo-aware scoping and supersede polish) and phase 5 (the
-team HTTP backend).
+Next: phase 5 (the team HTTP backend). Git-repo-aware scoping is intentionally
+left raw-cwd for now, pending some experiments.
 
 ## License
 

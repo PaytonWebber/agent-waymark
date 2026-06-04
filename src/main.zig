@@ -159,6 +159,11 @@ fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {
         };
     }
 
+    if (std.mem.eql(u8, cmd, "done")) {
+        if (args.len < 1) return error.DoneNeedsId;
+        return .{ .op = "done", .id = try std.fmt.parseInt(u64, args[0], 10) };
+    }
+
     if (std.mem.eql(u8, cmd, "forget")) {
         if (args.len < 1) return error.ForgetNeedsId;
         return .{ .op = "forget", .id = try std.fmt.parseInt(u64, args[0], 10) };
@@ -228,6 +233,7 @@ fn usage() void {
         \\  cairn recall <query>        [--scope S] [--kind K] [--limit N]
         \\  cairn timeline              [--scope S] [--kind K] [--limit N]
         \\  cairn header                [--scope S] [--limit N]
+        \\  cairn done <id>             mark a todo done (kept for history)
         \\  cairn forget <id>
         \\
         \\kinds: decision finding rejected todo artifact note

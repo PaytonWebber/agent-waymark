@@ -38,12 +38,14 @@ pub const Entry = struct {
     author: []u8,
     supersedes: ?u64,
     superseded_by: ?u64,
+    resolved: bool,
     embedding: []f32,
 
-    /// True once a later entry has replaced this one. Superseded entries are
-    /// kept (audit trail) but dropped from headers and default recall.
+    /// True unless a later entry has replaced this one or it was marked done.
+    /// Inactive entries are kept (audit trail) but dropped from headers, the
+    /// active timeline, and default recall.
     pub fn isActive(self: Entry) bool {
-        return self.superseded_by == null;
+        return self.superseded_by == null and !self.resolved;
     }
 };
 
@@ -72,6 +74,7 @@ pub const EntryJson = struct {
     author: []const u8,
     supersedes: ?u64 = null,
     superseded_by: ?u64 = null,
+    resolved: bool = false,
     embedding: []const f32,
 };
 

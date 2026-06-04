@@ -94,12 +94,26 @@ pub const Store = struct {
     /// unchanged.
     pub fn record(self: *Store, ne: NewEntry) !u64 {
         if (ne.embedding.len != embedder.dim) return error.EmbeddingDimMismatch;
+
+        // Supersede the head of the chain: if the named entry was itself already
+        // replaced, replace its current version instead of forking history.
+        var supersede_head: ?u64 = null;
         if (ne.supersedes) |old| {
             if (!self.entries.contains(old)) return error.SupersedesUnknownId;
+            supersede_head = self.chainHead(old);
+        }
+
+        var effective = ne;
+        effective.supersedes = supersede_head;
+        // Carry forward the replaced entry's refs when the caller gives none.
+        if (effective.refs.len == 0) {
+            if (supersede_head) |head| {
+                if (self.entries.get(head)) |old_e| effective.refs = old_e.refs;
+            }
         }
 
         const id = self.next_id;
-        const e = try self.allocEntry(id, ne);
+        const e = try self.allocEntry(id, effective);
         errdefer self.freeEntry(e);
 
         try self.index.add(self.allocator, id, e.embedding);
@@ -111,22 +125,45 @@ pub const Store = struct {
         // Link the superseded entry only after the new one is committed to the
         // map, so a failure above leaves the old entry untouched.
         var relinked = false;
-        if (ne.supersedes) |old| {
-            if (self.entries.getPtr(old)) |old_ptr| {
-                if (old_ptr.superseded_by == null) {
-                    old_ptr.superseded_by = id;
-                    relinked = true;
-                }
+        if (supersede_head) |head| {
+            if (self.entries.getPtr(head)) |old_ptr| {
+                old_ptr.superseded_by = id;
+                relinked = true;
             }
         }
         errdefer if (relinked) {
-            if (self.entries.getPtr(ne.supersedes.?)) |old_ptr| old_ptr.superseded_by = null;
+            if (self.entries.getPtr(supersede_head.?)) |old_ptr| old_ptr.superseded_by = null;
         };
 
         self.next_id += 1;
         errdefer self.next_id -= 1;
 
         try self.persist();
+        return id;
+    }
+
+    /// Mark an entry done (a finished todo). It stays in the store for the audit
+    /// trail but drops out of headers, the active timeline, and default recall.
+    /// Returns false if the id is unknown.
+    pub fn resolve(self: *Store, id: u64) !bool {
+        const ptr = self.entries.getPtr(id) orelse return false;
+        if (ptr.resolved) return true;
+        ptr.resolved = true;
+        errdefer ptr.resolved = false;
+        try self.persist();
+        return true;
+    }
+
+    /// Follow a supersede chain to its current (un-superseded) head.
+    fn chainHead(self: *Store, start: u64) u64 {
+        var id = start;
+        var guard: usize = 0;
+        while (self.entries.get(id)) |e| {
+            const next = e.superseded_by orelse break;
+            id = next;
+            guard += 1;
+            if (guard > self.entries.count()) break; // cycle guard
+        }
         return id;
     }
 
@@ -217,22 +254,45 @@ pub const Store = struct {
         max_todos: usize,
         max_decisions: usize,
     ) ![]u8 {
-        const todos = try self.timeline(arena, scope, .todo, max_todos);
-        const decisions = try self.timeline(arena, scope, .decision, max_decisions);
-        if (todos.len == 0 and decisions.len == 0) return "";
+        const todo_total = self.countActive(scope, .todo);
+        const dec_total = self.countActive(scope, .decision);
+        if (todo_total == 0 and dec_total == 0) return "";
 
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;
         try w.print("## cairn state — {s}\n", .{if (scope.len > 0) scope else "all scopes"});
-        if (todos.len > 0) {
-            try w.writeAll("\nOpen todos:\n");
-            for (todos) |h| try writeHeaderLine(w, h);
-        }
-        if (decisions.len > 0) {
-            try w.writeAll("\nRecent decisions:\n");
-            for (decisions) |h| try writeHeaderLine(w, h);
-        }
+        try self.writeSection(arena, w, scope, .todo, "Open todos", todo_total, max_todos);
+        try self.writeSection(arena, w, scope, .decision, "Recent decisions", dec_total, max_decisions);
         return out.toOwnedSlice();
+    }
+
+    fn writeSection(
+        self: *Store,
+        arena: Allocator,
+        w: *std.Io.Writer,
+        scope: []const u8,
+        kind: EntryKind,
+        label: []const u8,
+        total: usize,
+        max: usize,
+    ) !void {
+        if (total == 0) return;
+        const rows = try self.timeline(arena, scope, kind, max);
+        try w.print("\n{s} ({d}):\n", .{ label, total });
+        for (rows) |h| try writeHeaderLine(w, h);
+        if (total > rows.len) try w.print("  …and {d} more (recall to see them)\n", .{total - rows.len});
+    }
+
+    fn countActive(self: *Store, scope: []const u8, kind: EntryKind) usize {
+        var n: usize = 0;
+        var it = self.entries.valueIterator();
+        while (it.next()) |e| {
+            if (!e.isActive()) continue;
+            if (e.kind != kind) continue;
+            if (scope.len > 0 and !std.mem.eql(u8, e.scope, scope)) continue;
+            n += 1;
+        }
+        return n;
     }
 
     pub fn nowSeconds(self: *Store) i64 {
@@ -266,6 +326,7 @@ pub const Store = struct {
             var e = try self.allocEntry(r.id, ne);
             e.ts = r.ts; // preserve the saved timestamp rather than re-stamping
             e.superseded_by = r.superseded_by;
+            e.resolved = r.resolved;
             errdefer self.freeEntry(e);
             try self.index.add(self.allocator, r.id, e.embedding);
             try self.entries.put(self.allocator, r.id, e);
@@ -293,6 +354,7 @@ pub const Store = struct {
                 .author = e.author,
                 .supersedes = e.supersedes,
                 .superseded_by = e.superseded_by,
+                .resolved = e.resolved,
                 .embedding = e.embedding,
             };
         }
@@ -336,6 +398,7 @@ pub const Store = struct {
             .author = author_copy,
             .supersedes = ne.supersedes,
             .superseded_by = null,
+            .resolved = false,
             .embedding = emb_copy,
         };
     }

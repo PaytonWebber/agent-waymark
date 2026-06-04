@@ -89,8 +89,12 @@ chain the incumbents flatten into embeddings.
    extraction (auto-recording decisions from the transcript before it's
    summarized) is deferred; SessionStart(compact) re-injection covers continuity
    for now.
-4. **Scope and supersede polish.** Repo/branch/task scoping, header tuning,
-   auditable markdown materialization per scope.
+4. **Entry lifecycle + header polish.** [partial] Done: `done`/`resolve` to
+   finish a todo (kept for audit, dropped from header/active timeline/recall);
+   supersede follows to the chain head instead of forking and carries forward
+   refs; header shows per-kind counts and an overflow hint. Deferred:
+   git-repo/branch/task scoping (left raw-cwd pending experiments) and
+   per-scope markdown materialization.
 5. **Team backend.** Network bind + auth on the daemon via the SDK's Streamable
    HTTP transport; concurrency (RwLock + per-reader search contexts).
 

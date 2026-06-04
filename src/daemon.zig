@@ -118,6 +118,12 @@ fn dispatch(a: Allocator, io: std.Io, store: *Store, cfg: Config, req: Request) 
         return .{ .ok = true, .text = text };
     }
 
+    if (std.mem.eql(u8, op, "done")) {
+        const id = req.id orelse return Response.err("done requires id");
+        if (!try store.resolve(id)) return Response.err("unknown id");
+        return .{ .ok = true, .count = store.count() };
+    }
+
     if (std.mem.eql(u8, op, "forget")) {
         const id = req.id orelse return Response.err("forget requires id");
         const removed = try store.forget(id);

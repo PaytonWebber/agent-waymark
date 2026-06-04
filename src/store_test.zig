@@ -132,6 +132,64 @@ test "header surfaces open todos and recent decisions, skipping superseded" {
     try testing.expect(std.mem.indexOf(u8, header, "unrelated") == null); // other scope
 }
 
+test "done marks a todo inactive but keeps it" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const t1 = try store.record(.{ .kind = .todo, .scope = "repo:x", .body = "ship hooks", .embedding = try axisVec(a, 0) });
+    _ = try store.record(.{ .kind = .todo, .scope = "repo:x", .body = "ship installer", .embedding = try axisVec(a, 1) });
+
+    try testing.expect(try store.resolve(t1));
+    try testing.expect(!try store.resolve(9999)); // unknown id
+
+    // Resolved todo drops out of the active timeline but the entry remains.
+    const open = try store.timeline(a, "repo:x", .todo, 10);
+    try testing.expectEqual(@as(usize, 1), open.len);
+    try testing.expectEqualStrings("ship installer", open[0].body);
+    try testing.expectEqual(@as(usize, 2), store.count());
+
+    const header = try store.header(a, "repo:x", 5, 5);
+    try testing.expect(std.mem.indexOf(u8, header, "ship installer") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "ship hooks") == null);
+    try testing.expect(std.mem.indexOf(u8, header, "Open todos (1)") != null);
+}
+
+test "superseding a superseded entry follows to the chain head and inherits refs" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const refs = [_][]const u8{"src/store.zig"};
+    const v1 = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "v1", .refs = &refs, .embedding = try axisVec(a, 0) });
+    const v2 = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "v2", .supersedes = v1, .embedding = try axisVec(a, 0) });
+
+    // Supersede v1 again: it should replace the current head (v2), not fork.
+    const v3 = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "v3", .supersedes = v1, .embedding = try axisVec(a, 0) });
+
+    const active = try store.timeline(a, "repo:x", .decision, 10);
+    try testing.expectEqual(@as(usize, 1), active.len);
+    try testing.expectEqual(v3, active[0].id);
+    try testing.expectEqual(v2, active[0].supersedes.?); // replaced the head, not v1
+    // refs carried forward from v1 -> v2 -> v3 without being restated.
+    try testing.expectEqual(@as(usize, 1), active[0].refs.len);
+    try testing.expectEqualStrings("src/store.zig", active[0].refs[0]);
+}
+
 test "forget removes an entry" {
     const io = testIo();
     cleanup(io);
