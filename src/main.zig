@@ -20,6 +20,9 @@ const daemon = @import("daemon.zig");
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
 const mcp = @import("mcp.zig");
+const hooks = @import("hooks.zig");
+const scope_mod = @import("scope.zig");
+const install_mod = @import("install.zig");
 
 const Client = client_mod.Client;
 const Request = protocol.Request;
@@ -57,14 +60,25 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "mcp")) {
         return runMcp(allocator, io, env, cfg);
     }
+    if (std.mem.eql(u8, cmd, "hook")) {
+        return hooks.run(allocator, io, env, cfg, if (args.len > 0) args[0] else "");
+    }
+    if (std.mem.eql(u8, cmd, "install")) {
+        return install_mod.run(allocator, io, env, args);
+    }
 
-    const req = buildRequest(cmd, args) catch |err| {
+    var req = buildRequest(cmd, args) catch |err| {
         fatal("{s}", .{@errorName(err)});
     };
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
+
+    // Default the scope the same way the bridge and hooks do, so the CLI reads
+    // and writes the same project state. Pass an explicit `--scope ""` to span
+    // all scopes.
+    if (req.scope == null) req.scope = try scope_mod.forCwd(a, io, env, null);
 
     var client: Client = undefined;
     client.connectOrStart(allocator, io, cfg.socket_path) catch {
@@ -86,7 +100,7 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
 
     var handler: mcp.Handler = .{
         .client = &client,
-        .default_scope = try defaultScope(allocator, io, env),
+        .default_scope = try scope_mod.forCwd(allocator, io, env, null),
         .author = env.get("CAIRN_AUTHOR") orelse "claude-code",
     };
     var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
@@ -99,14 +113,6 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
         ,
     });
     try server.start(io);
-}
-
-/// The default scope tools use when none is given: an explicit CAIRN_SCOPE, or
-/// one derived from the working directory the bridge was launched in.
-fn defaultScope(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) ![]const u8 {
-    if (env.get("CAIRN_SCOPE")) |s| return s;
-    const cwd = std.process.currentPathAlloc(io, allocator) catch return "";
-    return std.fmt.allocPrint(allocator, "repo:{s}", .{cwd});
 }
 
 fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {
@@ -212,7 +218,11 @@ fn usage() void {
     std.debug.print(
         \\cairn — shared working-state for agent orchestration
         \\
-        \\  cairn daemon
+        \\  cairn install [--user]      register the MCP server + hooks with Claude Code
+        \\  cairn daemon                run the store owner (auto-started otherwise)
+        \\  cairn mcp                   run the MCP bridge over stdio
+        \\  cairn hook <Event>          run a hook (reads the event JSON on stdin)
+        \\
         \\  cairn ping
         \\  cairn record <kind> <body> [--scope S] [--author A] [--supersedes N]
         \\  cairn recall <query>        [--scope S] [--kind K] [--limit N]

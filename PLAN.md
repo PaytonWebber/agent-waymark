@@ -79,10 +79,16 @@ chain the incumbents flatten into embeddings.
    Tools: `record`, `recall`, `timeline`, `supersede`. Auto-starts the daemon;
    defaults each tool's scope to the launch directory. Standard stdio `command`
    config for Claude Code (`cairn mcp`).
-3. **Hook kit + installer.** `SessionStart` injects the scope header;
-   `UserPromptSubmit` injects semantic recall for the prompt; `PreCompact`
-   flushes in-flight decisions; `SubagentStart` seeds the sub-agent. One-command
-   install. This is the headline.
+3. **Hook kit + installer.** [done] `cairn hook <Event>` reads the event JSON on
+   stdin and injects context: `SessionStart` / `SubagentStart` inject the scope
+   header (SessionStart also fires on the `compact` source, re-injecting state
+   after a compaction); `UserPromptSubmit` injects prompt-relevant recall. Hooks
+   never block the session (any failure exits 0 silently). `cairn install`
+   merges the hooks + MCP server into Claude Code config (project or `--user`),
+   preserving existing config and idempotent on re-run. Deeper PreCompact
+   extraction (auto-recording decisions from the transcript before it's
+   summarized) is deferred; SessionStart(compact) re-injection covers continuity
+   for now.
 4. **Scope and supersede polish.** Repo/branch/task scoping, header tuning,
    auditable markdown materialization per scope.
 5. **Team backend.** Network bind + auth on the daemon via the SDK's Streamable
