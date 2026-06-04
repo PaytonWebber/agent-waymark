@@ -188,7 +188,7 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         const cands = extractor.extract(io, a, server.cfg.extract, transcript);
         var recorded: usize = 0;
         for (cands) |c| {
-            if (c.body.len == 0) continue;
+            if (c.body.len < 8) continue; // drop empties and leftover placeholders
             const kind = fuzzyKind(c.kind);
             const vec = embedder.embed(io, a, server.cfg.embed, c.body) catch continue;
             if (recordIfNew(a, io, store, lock, scope, kind, c.body, vec, server.cfg.sweep_dedup)) recorded += 1;

@@ -23,22 +23,38 @@ pub const max_candidates = 8;
 
 const preamble =
     \\You are extracting durable project memory from the tail of a coding-agent
-    \\session transcript (JSONL). Identify concrete architectural DECISIONS made,
-    \\dead ends or REJECTED approaches (with the reason), explicit TODOs that
-    \\remain, and important non-obvious FINDINGS. Ignore chit-chat, tool noise,
-    \\file dumps, and transient details. One concise sentence per entry.
-    \\
-    \\Each "kind" must be exactly one lowercase word: decision, rejected, todo, or
-    \\finding (one word, never a list). Respond ONLY with JSON of this shape, for
-    \\example:
-    \\{"entries":[{"kind":"decision","body":"chose Postgres over MySQL for JSONB"},
-    \\{"kind":"rejected","body":"SQLite — can't handle concurrent writes"},
-    \\{"kind":"todo","body":"add connection pooling before launch"}]}
-    \\At most 8 entries. If nothing durable stands out, return {"entries":[]}.
+    \\session transcript (JSONL). From the transcript ONLY, extract concrete
+    \\architectural decisions made, dead ends or rejected approaches (with the
+    \\reason), explicit todos that remain, and important non-obvious findings.
+    \\Ignore chit-chat, tool noise, file dumps, and transient details. One
+    \\concise sentence per entry, in your own words. At most 8 entries. Do not
+    \\invent entries; if nothing durable stands out, return an empty list.
     \\
     \\Transcript tail:
     \\
 ;
+
+// A JSON Schema passed to Ollama's `format` so the output is constrained: a
+// single `entries` array, `kind` restricted to the enum (no echoed list), and
+// no room to copy an example. This is what fixes both the duplicate-key
+// structure and the placeholder-leak that a prose example caused.
+const output_schema = .{
+    .type = "object",
+    .properties = .{
+        .entries = .{
+            .type = "array",
+            .items = .{
+                .type = "object",
+                .properties = .{
+                    .kind = .{ .type = "string", .@"enum" = [_][]const u8{ "decision", "rejected", "todo", "finding" } },
+                    .body = .{ .type = "string" },
+                },
+                .required = [_][]const u8{ "kind", "body" },
+            },
+        },
+    },
+    .required = [_][]const u8{"entries"},
+};
 
 /// Extract candidates from `transcript`, allocated in `arena`. Returns an empty
 /// slice on any failure.
@@ -55,7 +71,7 @@ fn tryExtract(io: std.Io, arena: std.mem.Allocator, cfg: Config, transcript: []c
         .model = cfg.model,
         .prompt = prompt,
         .stream = false,
-        .format = "json",
+        .format = output_schema,
         .keep_alive = "5m",
         .options = .{ .temperature = 0 },
     }, .{});
