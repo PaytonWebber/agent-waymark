@@ -480,6 +480,9 @@ fn writeHeaderLine(w: *std.Io.Writer, h: Hit) !void {
     try w.print("- #{d} {s}", .{ h.id, clipped });
     if (clipped.len < h.body.len) try w.writeAll("…");
     if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
+    // Flag branch-local entries so it's clear which are scoped to this branch
+    // rather than repo-wide.
+    if (std.mem.indexOf(u8, h.scope, "/branch/") != null) try w.writeAll(" [branch]");
     try w.writeByte('\n');
 }
 
