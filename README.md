@@ -87,13 +87,32 @@ zig build                # build the `cairn` binary (Zig 0.16)
 zig build test           # unit tests (offline, no Ollama)
 ```
 
+### Scoping
+
+State is scoped to the **git repository** (the toplevel, so subdirectories and
+worktrees of one repo share it). Within a repo, scope is hierarchical:
+
+- **Repo-wide** (`repo:<root>`) is the default for writes and is visible from
+  every branch — this is where durable decisions, findings, and rejected paths
+  live.
+- **Branch-local** (`repo:<root>/branch/<name>`) is opt-in (`--branch-local`, or
+  the `branch_local` tool arg) for work specific to a feature branch. It shows
+  only on that branch; the trunk (`main`/`master`) and other branches don't see
+  it.
+
+Reads run at the current branch and return repo-wide plus current-branch
+entries. Outside a git repo, everything is repo-wide for that directory.
+`CAIRN_SCOPE` overrides detection with a fixed scope.
+
 ### CLI
 
-Any subcommand auto-starts the daemon if it isn't running. Scope defaults to the
-current project; pass `--scope ""` to span all scopes.
+Any subcommand auto-starts the daemon if it isn't running. `record` writes
+repo-wide by default; add `--branch-local` for branch-specific entries. Pass
+`--scope ""` to span all scopes.
 
 ```bash
 cairn record decision "use a daemon to own the store"
+cairn record todo "wire up the new endpoint" --branch-local
 cairn recall  "who owns the store?"
 cairn timeline
 cairn header                        # the always-on session summary
@@ -124,8 +143,7 @@ want it faster still, point `CAIRN_EMBED_MODEL` at a smaller model (e.g.
 the store (or re-record) when you switch.
 
 Packaging for npm and the Claude plugin is in place; see [RELEASE.md](RELEASE.md).
-Still ahead: a cross-machine team backend (TCP + auth), and git-repo-aware
-scoping (left raw-cwd for now, pending some experiments).
+Still ahead: a cross-machine team backend (TCP + auth).
 
 ## License
 

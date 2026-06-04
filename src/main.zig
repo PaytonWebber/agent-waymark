@@ -85,10 +85,15 @@ pub fn main(init: std.process.Init) !void {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Default the scope the same way the bridge and hooks do, so the CLI reads
-    // and writes the same project state. Pass an explicit `--scope ""` to span
-    // all scopes.
-    if (req.scope == null) req.scope = try scope_mod.forCwd(a, io, env, null);
+    // Default the scope the same way the bridge and hooks do. `record` writes
+    // repo-wide by default (durable knowledge), or branch-local with
+    // `--branch-local`; everything else queries at the branch scope (reads see
+    // repo-wide + current branch). Pass an explicit `--scope ""` to span all.
+    if (req.scope == null) {
+        const info = scope_mod.detect(a, io, env, null);
+        const repo_wide_write = std.mem.eql(u8, cmd, "record") and !flagPresent(args, "--branch-local");
+        req.scope = if (repo_wide_write) info.repo_scope else info.branch_scope;
+    }
 
     var client: Client = undefined;
     client.connectOrStart(allocator, io, cfg.socket_path) catch {
@@ -108,9 +113,11 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
     try client.connectOrStart(allocator, io, cfg.socket_path);
     defer client.deinit();
 
+    const info = scope_mod.detect(allocator, io, env, null);
     var handler: mcp.Handler = .{
         .client = &client,
-        .default_scope = try scope_mod.forCwd(allocator, io, env, null),
+        .repo_scope = info.repo_scope,
+        .branch_scope = info.branch_scope,
         .author = env.get("CAIRN_AUTHOR") orelse "claude-code",
     };
     var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
@@ -202,6 +209,11 @@ fn flag(args: []const []const u8, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, args[i], name)) return args[i + 1];
     }
     return null;
+}
+
+fn flagPresent(args: []const []const u8, name: []const u8) bool {
+    for (args) |arg| if (std.mem.eql(u8, arg, name)) return true;
+    return false;
 }
 
 fn optU64(s: ?[]const u8) !?u64 {

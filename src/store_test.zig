@@ -237,6 +237,58 @@ test "pinned entry stays in the header regardless of recency" {
     }
 }
 
+test "scopeVisible is hierarchical (repo-wide inherited, branch isolated)" {
+    const v = store_mod.scopeVisible;
+    const repo = "repo:/p";
+    const branch = "repo:/p/branch/feature-x";
+    const other = "repo:/p/branch/other";
+
+    // Repo-wide entry is visible from a branch query and the repo query.
+    try testing.expect(v(repo, branch));
+    try testing.expect(v(repo, repo));
+    // Branch-local entry: visible on its branch, not on repo-wide or other branch.
+    try testing.expect(v(branch, branch));
+    try testing.expect(!v(branch, repo));
+    try testing.expect(!v(other, branch));
+    // Segment-safe: a prefix that isn't a path boundary doesn't match.
+    try testing.expect(!v("repo:/p/branch/feat", branch));
+    // Empty query matches all; empty (global) entry scope is visible anywhere.
+    try testing.expect(v(branch, ""));
+    try testing.expect(v("", branch));
+}
+
+test "recall and timeline see repo-wide entries from a branch scope" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const repo = "repo:/p";
+    const branch = "repo:/p/branch/feature-x";
+    _ = try store.record(.{ .kind = .decision, .scope = repo, .body = "repo-wide decision", .embedding = try axisVec(a, 0) });
+    _ = try store.record(.{ .kind = .todo, .scope = branch, .body = "branch task", .embedding = try axisVec(a, 1) });
+
+    // From the branch: both the repo-wide decision and the branch todo are visible.
+    const on_branch = try store.timeline(a, branch, null, 10);
+    try testing.expectEqual(@as(usize, 2), on_branch.len);
+
+    // From repo-wide scope: only the repo-wide decision (branch todo hidden).
+    const on_repo = try store.timeline(a, repo, null, 10);
+    try testing.expectEqual(@as(usize, 1), on_repo.len);
+    try testing.expectEqualStrings("repo-wide decision", on_repo[0].body);
+
+    // Recall at the branch scope can still reach the repo-wide entry.
+    const hits = try store.recall(a, try axisVec(a, 0), branch, null, 5);
+    try testing.expect(hits.len >= 1);
+    try testing.expectEqualStrings("repo-wide decision", hits[0].body);
+}
+
 test "forget removes an entry" {
     const io = testIo();
     cleanup(io);

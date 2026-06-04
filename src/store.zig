@@ -223,7 +223,7 @@ pub const Store = struct {
         for (out[0..n]) |sr| {
             const e = self.entries.get(sr.id) orelse continue;
             if (!e.isActive()) continue;
-            if (scope.len > 0 and !std.mem.eql(u8, e.scope, scope)) continue;
+            if (!scopeVisible(e.scope, scope)) continue;
             if (kind) |k| if (e.kind != k) continue;
             try hits.append(arena, try hydrate(arena, sr.score, e));
             if (hits.items.len >= limit) break;
@@ -453,10 +453,26 @@ fn castRefs(refs: [][]u8) []const []const u8 {
 /// Whether an entry is active and matches the optional scope/kind/pin filters.
 fn matches(e: Entry, scope: []const u8, kind: ?EntryKind, want_pinned: ?bool) bool {
     if (!e.isActive()) return false;
-    if (scope.len > 0 and !std.mem.eql(u8, e.scope, scope)) return false;
+    if (!scopeVisible(e.scope, scope)) return false;
     if (kind) |k| if (e.kind != k) return false;
     if (want_pinned) |wp| if (e.pinned != wp) return false;
     return true;
+}
+
+/// Hierarchical scope visibility: an entry is visible from a query when the
+/// entry's scope is an ancestor of (or equal to) the query. So a repo-wide
+/// entry (`repo:R`) shows from a branch query (`repo:R/branch/x`), a
+/// branch-local entry shows only from that branch (or deeper), and a repo-wide
+/// query does not pull in branch-local entries. An empty query matches all; an
+/// empty (global) entry scope is visible everywhere.
+pub fn scopeVisible(entry_scope: []const u8, query: []const u8) bool {
+    if (query.len == 0) return true;
+    if (entry_scope.len == 0) return true;
+    if (std.mem.eql(u8, entry_scope, query)) return true;
+    // entry is an ancestor of query: query == entry_scope ++ "/" ++ rest
+    return query.len > entry_scope.len and
+        std.mem.startsWith(u8, query, entry_scope) and
+        query[entry_scope.len] == '/';
 }
 
 fn writeHeaderLine(w: *std.Io.Writer, h: Hit) !void {

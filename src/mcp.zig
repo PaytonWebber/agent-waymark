@@ -27,12 +27,14 @@ const RecordArgs = struct {
     scope: ?[]const u8 = null,
     refs: ?[]const []const u8 = null,
     supersedes: ?i64 = null,
+    branch_local: bool = false,
     pub const descriptions = .{
         .kind = "Kind of entry. " ++ kinds_doc,
         .body = "The content: the decision made, the finding, the rejected path and why, or the todo.",
-        .scope = "Project/task scope. Defaults to the current project.",
+        .scope = "Project/task scope. Defaults to the whole repo.",
         .refs = "Optional related file paths, symbols, or \"entry:N\" references.",
         .supersedes = "Id of an earlier entry this replaces (e.g. a changed decision).",
+        .branch_local = "Scope this to the current git branch only (use for work specific to this branch). Defaults to repo-wide.",
     };
 };
 
@@ -89,7 +91,8 @@ const PinArgs = struct {
 
 pub const Handler = struct {
     client: *Client,
-    default_scope: []const u8,
+    repo_scope: []const u8, // default write level
+    branch_scope: []const u8, // reads and branch-local writes
     author: []const u8,
 
     pub fn listTools(_: *Handler, _: Allocator) !types.ListToolsResult {
@@ -166,7 +169,7 @@ pub const Handler = struct {
             .kind = args.kind,
             .body = args.body,
             .text = args.body,
-            .scope = args.scope orelse self.default_scope,
+            .scope = args.scope orelse (if (args.branch_local) self.branch_scope else self.repo_scope),
             .refs = args.refs,
             .author = self.author,
             .supersedes = optId(args.supersedes),
@@ -180,7 +183,7 @@ pub const Handler = struct {
             .kind = args.kind,
             .body = args.body,
             .text = args.body,
-            .scope = args.scope orelse self.default_scope,
+            .scope = args.scope orelse self.repo_scope,
             .author = self.author,
             .supersedes = optId(args.supersedes),
         });
@@ -202,7 +205,7 @@ pub const Handler = struct {
         return self.hits(a, .{
             .op = "recall",
             .text = args.query,
-            .scope = args.scope orelse self.default_scope,
+            .scope = args.scope orelse self.branch_scope,
             .kind = args.kind,
             .limit = clamp(args.limit, 1, 50),
         }, true);
@@ -212,7 +215,7 @@ pub const Handler = struct {
         const args = try types.parseArgs(TimelineArgs, a, params.arguments);
         return self.hits(a, .{
             .op = "timeline",
-            .scope = args.scope orelse self.default_scope,
+            .scope = args.scope orelse self.branch_scope,
             .kind = args.kind,
             .limit = clamp(args.limit, 1, 200),
         }, false);

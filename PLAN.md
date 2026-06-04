@@ -95,9 +95,12 @@ chain the incumbents flatten into embeddings.
    supersede follows to the chain head instead of forking and carries forward
    refs; header shows per-kind counts and an overflow hint; pin/unpin keeps a
    foundational entry always in the header instead of being truncated by
-   recency (dogfooding found the project thesis getting buried). Deferred:
-   git-repo/branch/task scoping (left raw-cwd pending experiments) and
-   per-scope markdown materialization.
+   recency (dogfooding found the project thesis getting buried). Plus
+   hierarchical git-aware scoping: scope is the git toplevel (subdirs/worktrees
+   share), with repo-wide entries (the default) inherited by every branch and
+   opt-in branch-local entries (`--branch-local`) isolated to their branch;
+   trunk and non-git collapse to repo-wide. Deferred: per-scope markdown
+   materialization, and promote-branch-local-on-merge.
 5. **Concurrency + team backend.** [partial] Done: the daemon serves
    connections from a pool of workers (a long-lived client like the MCP bridge
    no longer blocks a transient hook/CLI call — verified ~17ms response under a

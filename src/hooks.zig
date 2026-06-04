@@ -68,7 +68,7 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
         .{};
 
     const event = if (event_arg.len > 0) event_arg else (input.hook_event_name orelse return);
-    const scope = try scope_mod.forCwd(a, io, env, input.cwd);
+    const scope = scope_mod.detect(a, io, env, input.cwd);
 
     var client: Client = undefined;
     client.connectOrStart(allocator, io, cfg.socket_path) catch return;
@@ -76,12 +76,12 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
 
     // PreCompact: extract durable entries from the transcript and record them
     // (a side effect on the daemon), so state survives even when the agent
-    // didn't record as it went. Injects nothing.
+    // didn't record as it went. Swept entries are repo-wide. Injects nothing.
     if (std.mem.eql(u8, event, "PreCompact")) {
         const tpath = input.transcript_path orelse return;
         const tail = readTail(a, io, tpath, max_transcript_bytes);
         if (tail.len == 0) return;
-        _ = client.call(a, .{ .op = "sweep", .text = tail, .scope = scope }) catch return;
+        _ = client.call(a, .{ .op = "sweep", .text = tail, .scope = scope.repo_scope }) catch return;
         return;
     }
 
@@ -92,9 +92,9 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
 
     const text = blk: {
         if (std.mem.eql(u8, event, "UserPromptSubmit")) {
-            break :blk try recallContext(a, &client, scope, input.prompt orelse return, min_score);
+            break :blk try recallContext(a, &client, scope.branch_scope, input.prompt orelse return, min_score);
         }
-        const header = try headerContext(a, &client, scope);
+        const header = try headerContext(a, &client, scope.branch_scope);
         // SessionStart re-surfaces the write-discipline nudge every session and
         // after each compaction, even when the store is empty. Other events
         // (SubagentStart) just get the header, and stay silent if it is empty.
