@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (std.mem.eql(u8, cmd, "daemon")) {
-        return daemon.run(allocator, io, cfg);
+        return daemon.run(io, cfg);
     }
     if (std.mem.eql(u8, cmd, "mcp")) {
         return runMcp(allocator, io, env, cfg);

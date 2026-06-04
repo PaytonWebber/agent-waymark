@@ -1,9 +1,16 @@
 //! The daemon owns the one Store and serves the internal protocol over a unix
-//! socket, one request at a time. Clients (the MCP bridge, the hook CLI) are
-//! thin and stateless; all durable state lives here. This single-owner design
-//! is what keeps a user's main session and its sub-agents (separate processes)
-//! from corrupting a shared store, and the socket protocol is the seam the
-//! team HTTP backend reuses.
+//! socket. Clients (the MCP bridge, the hook CLI) are thin and stateless; all
+//! durable state lives here. This single-owner design is what keeps a user's
+//! main session and its sub-agents (separate processes) from corrupting a
+//! shared store, and the socket protocol is the seam the team HTTP backend
+//! reuses.
+//!
+//! Concurrency: a pool of workers each accept and serve connections, so a
+//! long-lived client (the MCP bridge holds its connection for the whole
+//! session) never blocks a transient one (a hook or CLI call). An RwLock guards
+//! the store — shared for reads, exclusive for writes — and the slow embedding
+//! call happens outside the lock. The allocator is the thread-safe smp
+//! allocator, since workers allocate concurrently.
 
 const std = @import("std");
 const embedder = @import("embedder.zig");
@@ -18,6 +25,7 @@ const Request = protocol.Request;
 const Response = protocol.Response;
 
 const buffer_size = 256 * 1024; // embeddings are ~10KB of JSON; leave headroom
+const worker_count = 8;
 
 pub const Config = struct {
     socket_path: []const u8,
@@ -25,33 +33,60 @@ pub const Config = struct {
     embed: embedder.Config = .{},
 };
 
+/// Shared, long-lived state handed to every worker. Lives in `run`'s frame,
+/// which stays alive (blocked in `group.await`) for the daemon's lifetime.
+const Server = struct {
+    store: *Store,
+    lock: *std.Io.RwLock,
+    listener: *std.Io.net.Server,
+    cfg: Config,
+};
+
 /// Open the store and serve until the process is killed. The socket file is
-/// removed on a clean exit and on startup (clearing a stale socket from a prior
-/// crash).
-pub fn run(allocator: Allocator, io: std.Io, cfg: Config) !void {
+/// removed on startup (clearing a stale socket from a prior crash) and on exit.
+pub fn run(io: std.Io, cfg: Config) !void {
+    const allocator = std.heap.smp_allocator;
+
     var store = try Store.init(allocator, io, cfg.store_path);
     defer store.deinit();
+    var lock: std.Io.RwLock = .init;
 
     const cwd = std.Io.Dir.cwd();
     cwd.deleteFile(io, cfg.socket_path) catch {}; // clear a stale socket
 
     const addr = try std.Io.net.UnixAddress.init(cfg.socket_path);
-    var server = try addr.listen(io, .{});
+    var listener = try addr.listen(io, .{});
     defer {
-        server.deinit(io);
+        listener.deinit(io);
         cwd.deleteFile(io, cfg.socket_path) catch {};
     }
 
+    var server: Server = .{ .store = &store, .lock = &lock, .listener = &listener, .cfg = cfg };
+
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    var spawned: usize = 0;
+    while (spawned < worker_count) : (spawned += 1) {
+        group.concurrent(io, worker, .{ allocator, io, &server }) catch break;
+    }
+    if (spawned == 0) return worker(allocator, io, &server); // no concurrency: serve inline
+    group.await(io) catch {};
+}
+
+fn worker(allocator: Allocator, io: std.Io, server: *Server) void {
     while (true) {
-        const stream = server.accept(io) catch continue;
-        handleConn(allocator, io, &store, cfg, stream);
+        const stream = server.listener.accept(io) catch |err| switch (err) {
+            error.Canceled => return,
+            else => continue,
+        };
+        handleConn(allocator, io, server, stream);
     }
 }
 
 /// Handle one connection: read request lines until the client disconnects,
 /// answering each. A malformed or failing request gets an error response but
 /// does not drop the connection.
-fn handleConn(allocator: Allocator, io: std.Io, store: *Store, cfg: Config, stream: std.Io.net.Stream) void {
+fn handleConn(allocator: Allocator, io: std.Io, server: *Server, stream: std.Io.net.Stream) void {
     defer stream.close(io);
     const rbuf = allocator.alloc(u8, buffer_size) catch return;
     defer allocator.free(rbuf);
@@ -74,21 +109,26 @@ fn handleConn(allocator: Allocator, io: std.Io, store: *Store, cfg: Config, stre
             },
         };
 
-        const resp = dispatch(a, io, store, cfg, parsed.value) catch |err|
+        const resp = dispatch(a, io, server, parsed.value) catch |err|
             Response.err(@errorName(err));
         protocol.writeLine(a, &writer.interface, resp) catch return;
     }
 }
 
-fn dispatch(a: Allocator, io: std.Io, store: *Store, cfg: Config, req: Request) !Response {
+fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
     const op = req.op;
+    const store = server.store;
+    const lock = server.lock;
     if (std.mem.eql(u8, op, "ping")) return .{ .ok = true, .text = "pong" };
 
     if (std.mem.eql(u8, op, "record")) {
         const kind_str = req.kind orelse return Response.err("record requires kind");
         const kind = EntryKind.fromString(kind_str) orelse return Response.err("unknown kind");
         const body = req.body orelse return Response.err("record requires body");
-        const vec = resolveVector(a, io, cfg, req, body) catch |e| return embedErr(e);
+        // Embed outside the lock; the model call is the slow part.
+        const vec = resolveVector(a, io, server.cfg, req, body) catch |e| return embedErr(e);
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
         const id = store.record(.{
             .kind = kind,
             .scope = req.scope orelse "",
@@ -103,31 +143,40 @@ fn dispatch(a: Allocator, io: std.Io, store: *Store, cfg: Config, req: Request) 
 
     if (std.mem.eql(u8, op, "recall")) {
         const query = req.text orelse return Response.err("recall requires query text");
-        const vec = resolveVector(a, io, cfg, req, query) catch |e| return embedErr(e);
+        const vec = resolveVector(a, io, server.cfg, req, query) catch |e| return embedErr(e);
+        lock.lockSharedUncancelable(io);
+        defer lock.unlockShared(io);
         const hits = try store.recall(a, vec, req.scope orelse "", optKind(req.kind), req.limit orelse 5);
         return hitsResponse(a, hits);
     }
 
     if (std.mem.eql(u8, op, "timeline")) {
+        lock.lockSharedUncancelable(io);
+        defer lock.unlockShared(io);
         const hits = try store.timeline(a, req.scope orelse "", optKind(req.kind), req.limit orelse 20);
         return hitsResponse(a, hits);
     }
 
     if (std.mem.eql(u8, op, "header")) {
+        lock.lockSharedUncancelable(io);
+        defer lock.unlockShared(io);
         const text = try store.header(a, req.scope orelse "", req.limit orelse 5, req.limit orelse 5);
         return .{ .ok = true, .text = text };
     }
 
     if (std.mem.eql(u8, op, "done")) {
         const id = req.id orelse return Response.err("done requires id");
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
         if (!try store.resolve(id)) return Response.err("unknown id");
         return .{ .ok = true, .count = store.count() };
     }
 
     if (std.mem.eql(u8, op, "forget")) {
         const id = req.id orelse return Response.err("forget requires id");
-        const removed = try store.forget(id);
-        if (!removed) return Response.err("unknown id");
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
+        if (!try store.forget(id)) return Response.err("unknown id");
         return .{ .ok = true, .count = store.count() };
     }
 

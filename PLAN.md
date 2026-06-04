@@ -95,8 +95,13 @@ chain the incumbents flatten into embeddings.
    refs; header shows per-kind counts and an overflow hint. Deferred:
    git-repo/branch/task scoping (left raw-cwd pending experiments) and
    per-scope markdown materialization.
-5. **Team backend.** Network bind + auth on the daemon via the SDK's Streamable
-   HTTP transport; concurrency (RwLock + per-reader search contexts).
+5. **Concurrency + team backend.** [partial] Done: the daemon serves
+   connections from a pool of workers (a long-lived client like the MCP bridge
+   no longer blocks a transient hook/CLI call — verified ~17ms response under a
+   held connection), guarded by an RwLock (shared reads, exclusive writes) with
+   embedding done outside the lock, on the thread-safe smp allocator; 20
+   concurrent writes land without loss or corruption. Remaining: network bind
+   (TCP) + auth for cross-machine team use.
 
 ## Phase 1 file map
 
