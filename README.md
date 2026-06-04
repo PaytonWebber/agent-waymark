@@ -26,40 +26,59 @@ shape the design:
 
 See [PLAN.md](PLAN.md) for the architecture and roadmap.
 
-## Status
+## Requirements
 
-Phases 1–3 are in: the daemon + store + protocol + CLI, the MCP bridge, and the
-hook kit. Built on [quantal](../quantajump) for the vector index and a local
-[Ollama](https://ollama.com) model for embeddings.
+A local [Ollama](https://ollama.com) with an embedding model:
 
 ```bash
-zig build                         # build the `cairn` binary
-zig build test                    # unit tests (offline, no Ollama)
+ollama pull nomic-embed-text   # 768-d, the default
 ```
 
-### Use with Claude Code
+Supported platforms: Linux (x64, arm64) and macOS (Apple Silicon, Intel).
 
-```bash
-zig build
-./zig-out/bin/cairn install          # this project (writes .claude/settings.json + .mcp.json)
-./zig-out/bin/cairn install --user   # every project (writes ~/.claude/settings.json)
+## Install
+
+### As a Claude Code plugin (recommended)
+
+```
+/plugin marketplace add PaytonWebber/cairn
+/plugin install cairn@cairn
 ```
 
-`install` registers both halves and is the whole point of the design:
+This registers both halves, which is the whole point of the design:
 
-- The **MCP bridge** (`record`, `recall`, `timeline`, `supersede`) is how the
-  model writes and explicitly queries state.
+- The **MCP server** (`record`, `recall`, `timeline`, `supersede`, `done`,
+  `pin`) is how the model writes and explicitly queries state.
 - The **hooks** are how recall actually happens, since a tool-only server can't
   inject context on its own:
-  - `SessionStart` injects the scope header (open todos + recent decisions),
-    including after a compaction, so a session starts oriented.
-  - `UserPromptSubmit` recalls entries relevant to each prompt and injects them,
-    so recall doesn't depend on the model choosing to ask.
-  - `SubagentStart` seeds a fresh sub-agent with the same header, so it doesn't
+  - `SessionStart` injects the scope header (pinned entries, open todos, recent
+    decisions), including after a compaction, so a session starts oriented.
+  - `UserPromptSubmit` recalls entries relevant to each prompt and injects the
+    strong matches, so recall doesn't depend on the model choosing to ask.
+  - `SubagentStart` seeds a fresh sub-agent with the header, so it doesn't
     re-discover what the parent already worked out.
 
-The merge preserves any hooks you already have and is idempotent. Everything is
-scoped to the project it runs in, so one `--user` install covers every repo.
+### As a CLI (npm)
+
+```bash
+npm install -g cairn
+```
+
+Gives you the `cairn` command. To wire a project (or all projects) into Claude
+Code without the plugin, `cairn install` merges the MCP server and hooks into
+your Claude Code config (idempotent, preserves existing hooks):
+
+```bash
+cairn install            # this project: .claude/settings.json + .mcp.json
+cairn install --user     # every project: ~/.claude/settings.json
+```
+
+### From source
+
+```bash
+zig build                # build the `cairn` binary (Zig 0.16)
+zig build test           # unit tests (offline, no Ollama)
+```
 
 ### CLI
 
@@ -80,8 +99,9 @@ cairn unpin <id>
 and `CAIRN_AUTHOR` configure the socket/snapshot paths, embedding endpoint/model,
 the default scope, and the author tag.
 
-Next: phase 5 (the team HTTP backend). Git-repo-aware scoping is intentionally
-left raw-cwd for now, pending some experiments.
+Packaging for npm and the Claude plugin is in place; see [RELEASE.md](RELEASE.md).
+Still ahead: a cross-machine team backend (TCP + auth), and git-repo-aware
+scoping (left raw-cwd for now, pending some experiments).
 
 ## License
 

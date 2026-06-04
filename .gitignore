@@ -3,3 +3,10 @@ zig-out/
 *.sock
 cairn-state.json
 cairn-state.json.tmp
+
+# Build artifacts (produced by scripts/build-dist.mjs at release time)
+node_modules/
+.dist/
+npm/
+binaries/
+*.tgz
