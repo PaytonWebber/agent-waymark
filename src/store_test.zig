@@ -190,6 +190,53 @@ test "superseding a superseded entry follows to the chain head and inherits refs
     try testing.expectEqualStrings("src/store.zig", active[0].refs[0]);
 }
 
+test "pinned entry stays in the header regardless of recency" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A foundational decision, then enough newer decisions to push it past the
+    // header's display limit.
+    const thesis = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "THESIS: shared working-state, not generic memory", .embedding = try axisVec(a, 0) });
+    for (0..6) |i| {
+        _ = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "later decision", .embedding = try axisVec(a, i + 1) });
+    }
+
+    // Without a pin, the thesis is truncated out of the (max 3) decisions shown.
+    {
+        const h = try store.header(a, "repo:x", 3, 3);
+        try testing.expect(std.mem.indexOf(u8, h, "THESIS") == null);
+        try testing.expect(std.mem.indexOf(u8, h, "Pinned:") == null);
+    }
+
+    try testing.expect(try store.setPinned(thesis, true));
+    try testing.expect(!try store.setPinned(9999, true)); // unknown id
+
+    // Pinned, it appears in the Pinned section and no longer in the recency list.
+    {
+        const h = try store.header(a, "repo:x", 3, 3);
+        try testing.expect(std.mem.indexOf(u8, h, "Pinned:") != null);
+        try testing.expect(std.mem.indexOf(u8, h, "THESIS") != null);
+        // The decisions count excludes the pinned thesis (6 later ones remain).
+        try testing.expect(std.mem.indexOf(u8, h, "Recent decisions (6)") != null);
+    }
+
+    // Unpin returns it to recency-only behavior (truncated again).
+    try testing.expect(try store.setPinned(thesis, false));
+    {
+        const h = try store.header(a, "repo:x", 3, 3);
+        try testing.expect(std.mem.indexOf(u8, h, "Pinned:") == null);
+        try testing.expect(std.mem.indexOf(u8, h, "THESIS") == null);
+    }
+}
+
 test "forget removes an entry" {
     const io = testIo();
     cleanup(io);

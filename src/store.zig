@@ -34,6 +34,10 @@ const Snapshot = entry_mod.Snapshot;
 /// library recommends for this dimension.
 pub const Index = quantal.Index(embedder.dim, 32, quantal.index.autoRoutingBits(embedder.dim));
 
+/// Cap on pinned entries shown in the header, to keep the always-on context
+/// compact even if pinning is overused.
+const max_pinned = 5;
+
 /// Fields for a new entry. `embedding` must already be `embedder.dim` long.
 pub const NewEntry = struct {
     kind: EntryKind,
@@ -154,6 +158,18 @@ pub const Store = struct {
         return true;
     }
 
+    /// Pin or unpin an entry. A pinned entry is always shown in the header
+    /// (until superseded or resolved), so a foundational decision is not lost to
+    /// recency truncation. Returns false if the id is unknown.
+    pub fn setPinned(self: *Store, id: u64, pinned: bool) !bool {
+        const ptr = self.entries.getPtr(id) orelse return false;
+        if (ptr.pinned == pinned) return true;
+        ptr.pinned = pinned;
+        errdefer ptr.pinned = !pinned;
+        try self.persist();
+        return true;
+    }
+
     /// Follow a supersede chain to its current (un-superseded) head.
     fn chainHead(self: *Store, start: u64) u64 {
         var id = start;
@@ -224,29 +240,13 @@ pub const Store = struct {
         kind: ?EntryKind,
         limit: usize,
     ) ![]Hit {
-        var ids = try std.ArrayList(u64).initCapacity(arena, self.entries.count());
-        var it = self.entries.iterator();
-        while (it.next()) |kv| {
-            const e = kv.value_ptr.*;
-            if (!e.isActive()) continue;
-            if (scope.len > 0 and !std.mem.eql(u8, e.scope, scope)) continue;
-            if (kind) |k| if (e.kind != k) continue;
-            try ids.append(arena, kv.key_ptr.*);
-        }
-        std.mem.sort(u64, ids.items, {}, std.sort.desc(u64));
-
-        const take = @min(ids.items.len, limit);
-        var hits = try std.ArrayList(Hit).initCapacity(arena, take);
-        for (ids.items[0..take]) |id| {
-            const e = self.entries.get(id).?;
-            try hits.append(arena, try hydrate(arena, 0, e));
-        }
-        return hits.items;
+        return self.collect(arena, scope, kind, null, limit);
     }
 
-    /// A compact, always-on summary for SessionStart injection: open todos and
-    /// recent decisions in a scope, newest-first, bodies clipped. Returns an
-    /// empty string when the scope has neither.
+    /// A compact, always-on summary for SessionStart injection: pinned entries
+    /// first (always shown, so a foundational decision is never truncated by
+    /// recency), then open todos and recent decisions, bodies clipped. Empty
+    /// string when the scope has nothing to show.
     pub fn header(
         self: *Store,
         arena: Allocator,
@@ -254,13 +254,19 @@ pub const Store = struct {
         max_todos: usize,
         max_decisions: usize,
     ) ![]u8 {
-        const todo_total = self.countActive(scope, .todo);
-        const dec_total = self.countActive(scope, .decision);
-        if (todo_total == 0 and dec_total == 0) return "";
+        const pinned = try self.collect(arena, scope, null, true, max_pinned);
+        // The kind sections exclude pinned entries, which appear above.
+        const todo_total = self.countMatching(scope, .todo, false);
+        const dec_total = self.countMatching(scope, .decision, false);
+        if (pinned.len == 0 and todo_total == 0 and dec_total == 0) return "";
 
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;
         try w.print("## cairn state — {s}\n", .{if (scope.len > 0) scope else "all scopes"});
+        if (pinned.len > 0) {
+            try w.writeAll("\nPinned:\n");
+            for (pinned) |h| try writeHeaderLine(w, h);
+        }
         try self.writeSection(arena, w, scope, .todo, "Open todos", todo_total, max_todos);
         try self.writeSection(arena, w, scope, .decision, "Recent decisions", dec_total, max_decisions);
         return out.toOwnedSlice();
@@ -277,20 +283,43 @@ pub const Store = struct {
         max: usize,
     ) !void {
         if (total == 0) return;
-        const rows = try self.timeline(arena, scope, kind, max);
+        const rows = try self.collect(arena, scope, kind, false, max);
         try w.print("\n{s} ({d}):\n", .{ label, total });
         for (rows) |h| try writeHeaderLine(w, h);
         if (total > rows.len) try w.print("  …and {d} more (recall to see them)\n", .{total - rows.len});
     }
 
-    fn countActive(self: *Store, scope: []const u8, kind: EntryKind) usize {
+    /// Active entries matching the filters, newest-first, hydrated into `arena`.
+    /// `kind == null` matches any kind; `want_pinned == null` ignores the pin
+    /// flag, `true`/`false` require it.
+    fn collect(
+        self: *Store,
+        arena: Allocator,
+        scope: []const u8,
+        kind: ?EntryKind,
+        want_pinned: ?bool,
+        limit: usize,
+    ) ![]Hit {
+        var ids = try std.ArrayList(u64).initCapacity(arena, self.entries.count());
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            if (matches(kv.value_ptr.*, scope, kind, want_pinned)) try ids.append(arena, kv.key_ptr.*);
+        }
+        std.mem.sort(u64, ids.items, {}, std.sort.desc(u64));
+
+        const take = @min(ids.items.len, limit);
+        var hits = try std.ArrayList(Hit).initCapacity(arena, take);
+        for (ids.items[0..take]) |id| {
+            try hits.append(arena, try hydrate(arena, 0, self.entries.get(id).?));
+        }
+        return hits.items;
+    }
+
+    fn countMatching(self: *Store, scope: []const u8, kind: ?EntryKind, want_pinned: ?bool) usize {
         var n: usize = 0;
         var it = self.entries.valueIterator();
         while (it.next()) |e| {
-            if (!e.isActive()) continue;
-            if (e.kind != kind) continue;
-            if (scope.len > 0 and !std.mem.eql(u8, e.scope, scope)) continue;
-            n += 1;
+            if (matches(e.*, scope, kind, want_pinned)) n += 1;
         }
         return n;
     }
@@ -327,6 +356,7 @@ pub const Store = struct {
             e.ts = r.ts; // preserve the saved timestamp rather than re-stamping
             e.superseded_by = r.superseded_by;
             e.resolved = r.resolved;
+            e.pinned = r.pinned;
             errdefer self.freeEntry(e);
             try self.index.add(self.allocator, r.id, e.embedding);
             try self.entries.put(self.allocator, r.id, e);
@@ -355,6 +385,7 @@ pub const Store = struct {
                 .supersedes = e.supersedes,
                 .superseded_by = e.superseded_by,
                 .resolved = e.resolved,
+                .pinned = e.pinned,
                 .embedding = e.embedding,
             };
         }
@@ -399,6 +430,7 @@ pub const Store = struct {
             .supersedes = ne.supersedes,
             .superseded_by = null,
             .resolved = false,
+            .pinned = false,
             .embedding = emb_copy,
         };
     }
@@ -416,6 +448,15 @@ pub const Store = struct {
 
 fn castRefs(refs: [][]u8) []const []const u8 {
     return @ptrCast(refs);
+}
+
+/// Whether an entry is active and matches the optional scope/kind/pin filters.
+fn matches(e: Entry, scope: []const u8, kind: ?EntryKind, want_pinned: ?bool) bool {
+    if (!e.isActive()) return false;
+    if (scope.len > 0 and !std.mem.eql(u8, e.scope, scope)) return false;
+    if (kind) |k| if (e.kind != k) return false;
+    if (want_pinned) |wp| if (e.pinned != wp) return false;
+    return true;
 }
 
 fn writeHeaderLine(w: *std.Io.Writer, h: Hit) !void {

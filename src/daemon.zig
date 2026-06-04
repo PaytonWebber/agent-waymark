@@ -172,6 +172,14 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         return .{ .ok = true, .count = store.count() };
     }
 
+    if (std.mem.eql(u8, op, "pin") or std.mem.eql(u8, op, "unpin")) {
+        const id = req.id orelse return Response.err("pin requires id");
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
+        if (!try store.setPinned(id, std.mem.eql(u8, op, "pin"))) return Response.err("unknown id");
+        return .{ .ok = true, .count = store.count() };
+    }
+
     if (std.mem.eql(u8, op, "forget")) {
         const id = req.id orelse return Response.err("forget requires id");
         lock.lockUncancelable(io);

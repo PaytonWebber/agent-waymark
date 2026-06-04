@@ -72,6 +72,8 @@ cairn recall  "who owns the store?"
 cairn timeline
 cairn header                        # the always-on session summary
 cairn done <id>                     # finish a todo (kept for history)
+cairn pin <id>                      # always show an entry in the header
+cairn unpin <id>
 ```
 
 `CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`, `CAIRN_SCOPE`,

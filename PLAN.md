@@ -92,7 +92,9 @@ chain the incumbents flatten into embeddings.
 4. **Entry lifecycle + header polish.** [partial] Done: `done`/`resolve` to
    finish a todo (kept for audit, dropped from header/active timeline/recall);
    supersede follows to the chain head instead of forking and carries forward
-   refs; header shows per-kind counts and an overflow hint. Deferred:
+   refs; header shows per-kind counts and an overflow hint; pin/unpin keeps a
+   foundational entry always in the header instead of being truncated by
+   recency (dogfooding found the project thesis getting buried). Deferred:
    git-repo/branch/task scoping (left raw-cwd pending experiments) and
    per-scope markdown materialization.
 5. **Concurrency + team backend.** [partial] Done: the daemon serves

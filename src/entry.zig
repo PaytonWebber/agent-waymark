@@ -39,6 +39,7 @@ pub const Entry = struct {
     supersedes: ?u64,
     superseded_by: ?u64,
     resolved: bool,
+    pinned: bool,
     embedding: []f32,
 
     /// True unless a later entry has replaced this one or it was marked done.
@@ -75,6 +76,7 @@ pub const EntryJson = struct {
     supersedes: ?u64 = null,
     superseded_by: ?u64 = null,
     resolved: bool = false,
+    pinned: bool = false,
     embedding: []const f32,
 };
 

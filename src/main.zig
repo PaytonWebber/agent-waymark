@@ -164,6 +164,11 @@ fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {
         return .{ .op = "done", .id = try std.fmt.parseInt(u64, args[0], 10) };
     }
 
+    if (std.mem.eql(u8, cmd, "pin") or std.mem.eql(u8, cmd, "unpin")) {
+        if (args.len < 1) return error.PinNeedsId;
+        return .{ .op = cmd, .id = try std.fmt.parseInt(u64, args[0], 10) };
+    }
+
     if (std.mem.eql(u8, cmd, "forget")) {
         if (args.len < 1) return error.ForgetNeedsId;
         return .{ .op = "forget", .id = try std.fmt.parseInt(u64, args[0], 10) };
@@ -234,6 +239,7 @@ fn usage() void {
         \\  cairn timeline              [--scope S] [--kind K] [--limit N]
         \\  cairn header                [--scope S] [--limit N]
         \\  cairn done <id>             mark a todo done (kept for history)
+        \\  cairn pin <id> | unpin <id> always show an entry in the header
         \\  cairn forget <id>
         \\
         \\kinds: decision finding rejected todo artifact note

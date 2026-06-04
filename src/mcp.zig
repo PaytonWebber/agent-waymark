@@ -78,6 +78,15 @@ const DoneArgs = struct {
     pub const descriptions = .{ .id = "Id of the todo (or entry) to mark done." };
 };
 
+const PinArgs = struct {
+    id: i64,
+    unpin: bool = false,
+    pub const descriptions = .{
+        .id = "Id of the entry to pin (or unpin).",
+        .unpin = "Set true to remove an existing pin.",
+    };
+};
+
 pub const Handler = struct {
     client: *Client,
     default_scope: []const u8,
@@ -113,6 +122,11 @@ pub const Handler = struct {
                     .description = "Mark a todo done so it drops out of the session header. Kept for history.",
                     .inputSchema = comptime types.schemaForStruct(DoneArgs),
                 },
+                .{
+                    .name = "pin",
+                    .description = "Pin a foundational entry so it always appears in the session header, not subject to recency truncation. Use sparingly. Set unpin to remove.",
+                    .inputSchema = comptime types.schemaForStruct(PinArgs),
+                },
             },
         };
     }
@@ -123,7 +137,18 @@ pub const Handler = struct {
         if (std.mem.eql(u8, params.name, "timeline")) return self.timeline(a, params);
         if (std.mem.eql(u8, params.name, "supersede")) return self.supersede(a, params);
         if (std.mem.eql(u8, params.name, "done")) return self.done(a, params);
+        if (std.mem.eql(u8, params.name, "pin")) return self.pin(a, params);
         return error.ToolNotFound;
+    }
+
+    fn pin(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
+        const args = try types.parseArgs(PinArgs, a, params.arguments);
+        if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
+        const op: []const u8 = if (args.unpin) "unpin" else "pin";
+        const parsed = self.client.call(a, .{ .op = op, .id = @intCast(args.id) }) catch return daemonDown(a);
+        if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "pin failed");
+        const verb = if (args.unpin) "Unpinned" else "Pinned";
+        return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "{s} #{d}.", .{ verb, args.id }));
     }
 
     fn done(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
