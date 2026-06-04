@@ -35,6 +35,18 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/cli.js", "hook", "PreCompact"],
+            "timeout": 120
+          }
+        ]
+      }
     ]
   }
 }

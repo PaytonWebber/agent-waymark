@@ -28,7 +28,11 @@ const HookInput = struct {
     cwd: ?[]const u8 = null,
     prompt: ?[]const u8 = null, // UserPromptSubmit
     source: ?[]const u8 = null, // SessionStart: startup|resume|clear|compact
+    transcript_path: ?[]const u8 = null, // PreCompact
 };
+
+/// How much of the transcript tail the PreCompact sweep sends for extraction.
+const max_transcript_bytes = 24 * 1024;
 
 /// Minimum cosine score for a recall hit to be auto-injected on a prompt.
 /// Embeddings are L2-normalized so scores are comparable across queries: real
@@ -70,6 +74,17 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
     client.connectOrStart(allocator, io, cfg.socket_path) catch return;
     defer client.deinit();
 
+    // PreCompact: extract durable entries from the transcript and record them
+    // (a side effect on the daemon), so state survives even when the agent
+    // didn't record as it went. Injects nothing.
+    if (std.mem.eql(u8, event, "PreCompact")) {
+        const tpath = input.transcript_path orelse return;
+        const tail = readTail(a, io, tpath, max_transcript_bytes);
+        if (tail.len == 0) return;
+        _ = client.call(a, .{ .op = "sweep", .text = tail, .scope = scope }) catch return;
+        return;
+    }
+
     const min_score = if (env.get("CAIRN_MIN_SCORE")) |s|
         std.fmt.parseFloat(f32, s) catch default_min_score
     else
@@ -94,6 +109,14 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
 
     if (text.len == 0) return; // nothing relevant: stay silent
     try emit(io, a, event, text);
+}
+
+/// Last `max` bytes of the file at `path`, or "" on any failure. The tail is
+/// what a sweep cares about; the file is JSONL and the model tolerates a partial
+/// leading line.
+fn readTail(a: Allocator, io: std.Io, path: []const u8, max: usize) []const u8 {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(8 * 1024 * 1024)) catch return "";
+    return if (bytes.len <= max) bytes else bytes[bytes.len - max ..];
 }
 
 /// The always-on scope header for SessionStart / SubagentStart.

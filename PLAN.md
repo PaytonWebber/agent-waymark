@@ -85,10 +85,11 @@ chain the incumbents flatten into embeddings.
    after a compaction); `UserPromptSubmit` injects prompt-relevant recall. Hooks
    never block the session (any failure exits 0 silently). `cairn install`
    merges the hooks + MCP server into Claude Code config (project or `--user`),
-   preserving existing config and idempotent on re-run. Deeper PreCompact
-   extraction (auto-recording decisions from the transcript before it's
-   summarized) is deferred; SessionStart(compact) re-injection covers continuity
-   for now.
+   preserving existing config and idempotent on re-run. A `PreCompact` sweep
+   extracts decisions/findings/todos from the transcript tail with a local chat
+   model (via the daemon `sweep` op) and records the new ones, deduped against
+   existing entries, so durable state survives even without manual recording;
+   best-effort and opt-in by model availability.
 4. **Entry lifecycle + header polish.** [partial] Done: `done`/`resolve` to
    finish a todo (kept for audit, dropped from header/active timeline/recall);
    supersede follows to the chain head instead of forking and carries forward

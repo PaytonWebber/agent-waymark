@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const embedder = @import("embedder.zig");
+const extractor = @import("extractor.zig");
 const entry_mod = @import("entry.zig");
 const store_mod = @import("store.zig");
 const protocol = @import("protocol.zig");
@@ -24,13 +25,20 @@ const EntryKind = entry_mod.EntryKind;
 const Request = protocol.Request;
 const Response = protocol.Response;
 
-const buffer_size = 256 * 1024; // embeddings are ~10KB of JSON; leave headroom
+const buffer_size = 512 * 1024; // embeddings ~10KB; the sweep sends a transcript tail
 const worker_count = 8;
+
+/// Default cosine above which a swept candidate is treated as already known and
+/// skipped. Catches obvious repeats and near-paraphrases; genuinely distinct
+/// entries rarely exceed it. Tunable per embedding model via CAIRN_SWEEP_DEDUP.
+pub const default_sweep_dedup: f32 = 0.85;
 
 pub const Config = struct {
     socket_path: []const u8,
     store_path: []const u8,
     embed: embedder.Config = .{},
+    extract: extractor.Config = .{},
+    sweep_dedup: f32 = default_sweep_dedup,
 };
 
 /// Shared, long-lived state handed to every worker. Lives in `run`'s frame,
@@ -172,6 +180,22 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         return .{ .ok = true, .count = store.count() };
     }
 
+    if (std.mem.eql(u8, op, "sweep")) {
+        const transcript = req.text orelse return Response.err("sweep requires text");
+        const scope = req.scope orelse "";
+        // Extraction (a model generation) and embedding are slow and run outside
+        // the lock; only the per-candidate dedup-and-record touches the store.
+        const cands = extractor.extract(io, a, server.cfg.extract, transcript);
+        var recorded: usize = 0;
+        for (cands) |c| {
+            if (c.body.len == 0) continue;
+            const kind = fuzzyKind(c.kind);
+            const vec = embedder.embed(io, a, server.cfg.embed, c.body) catch continue;
+            if (recordIfNew(a, io, store, lock, scope, kind, c.body, vec, server.cfg.sweep_dedup)) recorded += 1;
+        }
+        return .{ .ok = true, .count = recorded };
+    }
+
     if (std.mem.eql(u8, op, "pin") or std.mem.eql(u8, op, "unpin")) {
         const id = req.id orelse return Response.err("pin requires id");
         lock.lockUncancelable(io);
@@ -191,6 +215,36 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
     return Response.err("unknown op");
 }
 
+/// Record a swept candidate unless a near-identical entry already exists in
+/// scope. Holds the write lock for the dedup check plus the insert so the two
+/// are atomic. Returns whether it recorded.
+fn recordIfNew(
+    a: std.mem.Allocator,
+    io: std.Io,
+    store: *Store,
+    lock: *std.Io.RwLock,
+    scope: []const u8,
+    kind: EntryKind,
+    body: []const u8,
+    vec: []const f32,
+    dedup_threshold: f32,
+) bool {
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
+
+    const hits = store.recall(a, vec, scope, null, 1) catch return false;
+    if (hits.len > 0 and hits[0].score >= dedup_threshold) return false;
+
+    _ = store.record(.{
+        .kind = kind,
+        .scope = scope,
+        .body = body,
+        .author = "cairn-sweep",
+        .embedding = vec,
+    }) catch return false;
+    return true;
+}
+
 /// Resolve the vector for a request: a precomputed `embedding` (validated) or
 /// embed `text` via the model.
 fn resolveVector(a: Allocator, io: std.Io, cfg: Config, req: Request, text: []const u8) ![]const f32 {
@@ -203,6 +257,21 @@ fn resolveVector(a: Allocator, io: std.Io, cfg: Config, req: Request, text: []co
 
 fn optKind(s: ?[]const u8) ?EntryKind {
     return if (s) |str| EntryKind.fromString(str) else null;
+}
+
+/// Lenient kind for swept candidates: an extraction model may return a wrong
+/// case or echo the enum list, so map to the closest real kind rather than drop
+/// the entry. Falls back to `note`.
+fn fuzzyKind(s: []const u8) EntryKind {
+    var buf: [40]u8 = undefined;
+    const n = @min(s.len, buf.len);
+    const low = std.ascii.lowerString(buf[0..n], s[0..n]);
+    if (EntryKind.fromString(low)) |k| return k;
+    if (std.mem.indexOf(u8, low, "reject") != null or std.mem.indexOf(u8, low, "dead") != null) return .rejected;
+    if (std.mem.indexOf(u8, low, "todo") != null) return .todo;
+    if (std.mem.indexOf(u8, low, "deci") != null) return .decision;
+    if (std.mem.indexOf(u8, low, "find") != null or std.mem.indexOf(u8, low, "found") != null) return .finding;
+    return .note;
 }
 
 fn hitsResponse(a: Allocator, hits: []entry_mod.Hit) !Response {

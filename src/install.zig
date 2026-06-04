@@ -16,7 +16,7 @@ const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 const Array = std.json.Array;
 
-const events = [_][]const u8{ "SessionStart", "UserPromptSubmit", "SubagentStart" };
+const events = [_][]const u8{ "SessionStart", "UserPromptSubmit", "SubagentStart", "PreCompact" };
 
 pub fn run(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, args: []const []const u8) !void {
     const user = hasFlag(args, "--user");

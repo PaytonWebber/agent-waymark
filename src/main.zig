@@ -16,6 +16,7 @@
 const std = @import("std");
 const sdk = @import("zig_mcp_sdk");
 const embedder = @import("embedder.zig");
+const extractor = @import("extractor.zig");
 const daemon = @import("daemon.zig");
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
@@ -53,6 +54,14 @@ pub fn main(init: std.process.Init) !void {
             .model = env.get("CAIRN_EMBED_MODEL") orelse embedder.Config.default_model,
             .keep_alive = env.get("CAIRN_EMBED_KEEP_ALIVE") orelse embedder.Config.default_keep_alive,
         },
+        .extract = .{
+            .url = env.get("CAIRN_EXTRACT_URL") orelse extractor.Config.default_url,
+            .model = env.get("CAIRN_EXTRACT_MODEL") orelse extractor.Config.default_model,
+        },
+        .sweep_dedup = if (env.get("CAIRN_SWEEP_DEDUP")) |s|
+            std.fmt.parseFloat(f32, s) catch daemon.default_sweep_dedup
+        else
+            daemon.default_sweep_dedup,
     };
 
     if (std.mem.eql(u8, cmd, "daemon")) {

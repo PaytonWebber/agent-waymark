@@ -10,7 +10,12 @@ First release.
 - MCP server (`record`, `recall`, `timeline`, `supersede`, `done`, `pin`).
 - Claude Code hook kit: `SessionStart` and `SubagentStart` inject the scope
   header; `UserPromptSubmit` injects prompt-relevant recall (gated on a cosine
-  relevance floor so off-topic prompts add nothing).
+  relevance floor so off-topic prompts add nothing); `PreCompact` extracts
+  decisions/findings/todos from the transcript with a local chat model and
+  records the new ones (deduped), so state survives without manual recording.
+- The MCP server instructions and SessionStart nudge prompt the agent to record
+  as it works; the embedder is kept warm (`keep_alive`) to avoid cold-load
+  latency on the per-prompt hook.
 - `cairn install` merges the MCP server + hooks into Claude Code config
   (project or `--user`), preserving existing config and idempotent on re-run.
 - Entry lifecycle: `done`/resolve, supersede chain-head resolution with ref

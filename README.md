@@ -31,10 +31,13 @@ See [PLAN.md](PLAN.md) for the architecture and roadmap.
 A local [Ollama](https://ollama.com) with an embedding model:
 
 ```bash
-ollama pull nomic-embed-text   # 768-d, the default
+ollama pull nomic-embed-text   # 768-d, the default (required, for recall)
+ollama pull llama3.2           # optional: enables the PreCompact sweep
 ```
 
-Supported platforms: Linux (x64, arm64) and macOS (Apple Silicon, Intel).
+The second model is only for the `PreCompact` sweep; without it, that hook
+no-ops and everything else works. Supported platforms: Linux (x64, arm64) and
+macOS (Apple Silicon, Intel).
 
 ## Install
 
@@ -57,6 +60,10 @@ This registers both halves, which is the whole point of the design:
     strong matches, so recall doesn't depend on the model choosing to ask.
   - `SubagentStart` seeds a fresh sub-agent with the header, so it doesn't
     re-discover what the parent already worked out.
+  - `PreCompact` extracts decisions, findings, and todos from the session
+    transcript with a local chat model and records the new ones, so state
+    survives even when nothing was recorded by hand. Best-effort and opt-in by
+    model availability (see below); it no-ops if no extraction model is present.
 
 ### As a CLI (npm)
 
@@ -95,11 +102,17 @@ cairn pin <id>                      # always show an entry in the header
 cairn unpin <id>
 ```
 
-`CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`,
-`CAIRN_EMBED_KEEP_ALIVE`, `CAIRN_SCOPE`, `CAIRN_AUTHOR`, and `CAIRN_MIN_SCORE`
-configure the socket/snapshot paths, the embedding endpoint/model, how long the
-model stays warm, the default scope, the author tag, and the recall relevance
-floor for the prompt hook.
+Environment knobs: `CAIRN_SOCKET`, `CAIRN_STORE` (socket/snapshot paths);
+`CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`, `CAIRN_EMBED_KEEP_ALIVE` (embedding
+endpoint/model and warm-up window); `CAIRN_SCOPE`, `CAIRN_AUTHOR`; `CAIRN_MIN_SCORE`
+(recall floor for the prompt hook); and for the PreCompact sweep,
+`CAIRN_EXTRACT_URL`, `CAIRN_EXTRACT_MODEL` (default `llama3.2`), and
+`CAIRN_SWEEP_DEDUP` (cosine above which a swept entry is treated as already
+known, default `0.85`).
+
+The sweep is best-effort: extraction quality scales with `CAIRN_EXTRACT_MODEL`
+(a small model may miss entries or occasionally record a paraphrase of one
+already stored), so use a capable local model for it.
 
 ### Latency
 
