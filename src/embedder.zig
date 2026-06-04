@@ -65,5 +65,17 @@ pub fn embed(io: std.Io, allocator: std.mem.Allocator, cfg: Config, text: []cons
 
     const out = try allocator.alloc(f32, dim);
     @memcpy(out, parsed.value.embedding);
+    normalize(out);
     return out;
+}
+
+/// L2-normalize in place so the index's inner-product score is cosine
+/// similarity (comparable across queries, which lets recall apply a relevance
+/// floor). Scale-invariant, so it does not affect SimHash routing.
+pub fn normalize(v: []f32) void {
+    var sum: f64 = 0;
+    for (v) |x| sum += @as(f64, x) * x;
+    if (sum <= 0) return;
+    const inv: f32 = @floatCast(1.0 / @sqrt(sum));
+    for (v) |*x| x.* *= inv;
 }
