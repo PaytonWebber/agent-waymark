@@ -15,9 +15,14 @@ pub const dim: usize = build_options.dim;
 pub const Config = struct {
     pub const default_url = "http://localhost:11434/api/embeddings";
     pub const default_model = "nomic-embed-text";
+    // Keep the embedding model resident between calls. The per-prompt hook
+    // embeds on every turn, so a warm model means ~20-30ms instead of a cold
+    // load; this just widens the window so an idle gap doesn't force a reload.
+    pub const default_keep_alive = "30m";
 
     url: []const u8 = default_url,
     model: []const u8 = default_model,
+    keep_alive: []const u8 = default_keep_alive,
 };
 
 pub const Error = error{
@@ -34,7 +39,7 @@ pub fn embed(io: std.Io, allocator: std.mem.Allocator, cfg: Config, text: []cons
 
     const body = try std.json.Stringify.valueAlloc(
         allocator,
-        .{ .model = cfg.model, .prompt = text },
+        .{ .model = cfg.model, .prompt = text, .keep_alive = cfg.keep_alive },
         .{},
     );
     defer allocator.free(body);

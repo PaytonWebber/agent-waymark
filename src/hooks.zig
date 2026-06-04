@@ -37,6 +37,15 @@ const HookInput = struct {
 /// CAIRN_MIN_SCORE.
 const default_min_score: f32 = 0.45;
 
+/// Re-surfaced at every SessionStart (and after compaction) so the agent keeps
+/// writing to cairn instead of letting the store go stale. The MCP server's
+/// instructions carry the same guidance; this repeats it where it is most
+/// likely to be acted on.
+const session_nudge =
+    "cairn is active. As you work, record decisions, dead ends, and todos " ++
+    "(record / supersede / done), and recall before re-investigating something, " ++
+    "so this work carries to later sessions and sub-agents.";
+
 /// Never returns an error: a hook that fails must not break the session.
 pub fn run(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: daemon.Config, event: []const u8) void {
     body(allocator, io, env, cfg, event) catch return;
@@ -66,10 +75,22 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
     else
         default_min_score;
 
-    const text = if (std.mem.eql(u8, event, "UserPromptSubmit"))
-        try recallContext(a, &client, scope, input.prompt orelse return, min_score)
-    else
-        try headerContext(a, &client, scope);
+    const text = blk: {
+        if (std.mem.eql(u8, event, "UserPromptSubmit")) {
+            break :blk try recallContext(a, &client, scope, input.prompt orelse return, min_score);
+        }
+        const header = try headerContext(a, &client, scope);
+        // SessionStart re-surfaces the write-discipline nudge every session and
+        // after each compaction, even when the store is empty. Other events
+        // (SubagentStart) just get the header, and stay silent if it is empty.
+        if (std.mem.eql(u8, event, "SessionStart")) {
+            break :blk if (header.len > 0)
+                try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ session_nudge, header })
+            else
+                session_nudge;
+        }
+        break :blk header;
+    };
 
     if (text.len == 0) return; // nothing relevant: stay silent
     try emit(io, a, event, text);

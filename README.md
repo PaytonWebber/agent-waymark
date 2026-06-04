@@ -95,9 +95,20 @@ cairn pin <id>                      # always show an entry in the header
 cairn unpin <id>
 ```
 
-`CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`, `CAIRN_SCOPE`,
-and `CAIRN_AUTHOR` configure the socket/snapshot paths, embedding endpoint/model,
-the default scope, and the author tag.
+`CAIRN_SOCKET`, `CAIRN_STORE`, `CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`,
+`CAIRN_EMBED_KEEP_ALIVE`, `CAIRN_SCOPE`, `CAIRN_AUTHOR`, and `CAIRN_MIN_SCORE`
+configure the socket/snapshot paths, the embedding endpoint/model, how long the
+model stays warm, the default scope, the author tag, and the recall relevance
+floor for the prompt hook.
+
+### Latency
+
+The `UserPromptSubmit` hook embeds each prompt before the turn proceeds. With a
+warm model that is ~20-30ms; the only slow case is a cold load after an idle
+gap, which `CAIRN_EMBED_KEEP_ALIVE` (default `30m`) is there to avoid. If you
+want it faster still, point `CAIRN_EMBED_MODEL` at a smaller model (e.g.
+`all-minilm`); the query and stored vectors must use the same model, so delete
+the store (or re-record) when you switch.
 
 Packaging for npm and the Claude plugin is in place; see [RELEASE.md](RELEASE.md).
 Still ahead: a cross-machine team backend (TCP + auth), and git-repo-aware

@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
         .embed = .{
             .url = env.get("CAIRN_EMBED_URL") orelse embedder.Config.default_url,
             .model = env.get("CAIRN_EMBED_MODEL") orelse embedder.Config.default_model,
+            .keep_alive = env.get("CAIRN_EMBED_KEEP_ALIVE") orelse embedder.Config.default_keep_alive,
         },
     };
 
@@ -107,9 +108,16 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
         .server_info = .{ .name = "cairn", .version = "0.0.0" },
         .capabilities = .{ .tools = .{} },
         .instructions =
-            \\Shared working-state for this project. Record decisions, findings,
-            \\rejected paths, and todos so later sessions and sub-agents don't
-            \\re-derive them; recall them before re-investigating something.
+            \\Shared working-state for this project, so work carries across
+            \\sessions and sub-agents. Be proactive about writing to it:
+            \\  - When you make an architectural decision, hit a dead end, learn
+            \\    a non-obvious fact, or take on a task, record it (record /
+            \\    supersede / done). Capture decisions and dead ends, not every
+            \\    thought.
+            \\  - Before investigating something non-trivial, recall first to see
+            \\    if it was already decided or tried.
+            \\Relevant prior entries are injected automatically at session start
+            \\and on each prompt; build on them instead of starting cold.
         ,
     });
     try server.start(io);
