@@ -4,8 +4,14 @@
     .fingerprint = 0x16aa205d6d6fba62,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .quantal = .{ .path = "../quantajump" },
-        .zig_mcp_sdk = .{ .path = "../zig-mcp-sdk" },
+        .quantal = .{
+            .url = "git+https://github.com/PaytonWebber/quantal.git#76c75a299a979d29041b0ffd87e06c9ddee65429",
+            .hash = "quantal-0.1.0-13i02JHVAgDwRZNLqCcHHjBDMSLDOhZ7Qp9tnx9yRESb",
+        },
+        .zig_mcp_sdk = .{
+            .url = "git+https://github.com/PaytonWebber/zig-mcp-sdk.git#3d79347a128cd3a1982a1f6ce85e79e138ce0254",
+            .hash = "zig_mcp_sdk-0.0.0-FT3Vjc5IAgDNLbNrGhCc7nDRq1qdpiYIliMGQFe15gyM",
+        },
     },
     .paths = .{
         "build.zig",
