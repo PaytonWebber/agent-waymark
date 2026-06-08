@@ -65,7 +65,7 @@ jobs:
         run: |
           npm pack --dry-run
           for package_dir in npm/linux-x64 npm/linux-arm64 npm/darwin-arm64 npm/darwin-x64; do
-            npm pack --dry-run "$package_dir"
+            npm pack --dry-run "./$package_dir"
           done
 
       - name: Publish platform packages
@@ -73,7 +73,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for package_dir in npm/linux-x64 npm/linux-arm64 npm/darwin-arm64 npm/darwin-x64; do
-            npm publish "$package_dir" --access public --provenance
+            npm publish "./$package_dir" --access public --provenance
           done
 
       - name: Publish main package
