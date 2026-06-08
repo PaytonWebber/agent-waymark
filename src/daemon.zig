@@ -8,7 +8,7 @@
 //! Concurrency: a pool of workers each accept and serve connections, so a
 //! long-lived client (the MCP bridge holds its connection for the whole
 //! session) never blocks a transient one (a hook or CLI call). An RwLock guards
-//! the store — shared for reads, exclusive for writes — and the slow embedding
+//! the store, shared for reads and exclusive for writes, and the slow embedding
 //! call happens outside the lock. The allocator is the thread-safe smp
 //! allocator, since workers allocate concurrently.
 
@@ -30,7 +30,7 @@ const worker_count = 8;
 
 /// Default cosine above which a swept candidate is treated as already known and
 /// skipped. Catches obvious repeats and near-paraphrases; genuinely distinct
-/// entries rarely exceed it. Tunable per embedding model via CAIRN_SWEEP_DEDUP.
+/// entries rarely exceed it. Tunable per embedding model via AGENT_WAYMARK_SWEEP_DEDUP.
 pub const default_sweep_dedup: f32 = 0.85;
 
 pub const Config = struct {
@@ -239,7 +239,7 @@ fn recordIfNew(
         .kind = kind,
         .scope = scope,
         .body = body,
-        .author = "cairn-sweep",
+        .author = "agent-waymark-sweep",
         .embedding = vec,
     }) catch return false;
     return true;

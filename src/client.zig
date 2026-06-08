@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const net = std.Io.net;
+const posix = std.posix;
 const protocol = @import("protocol.zig");
 
 const Allocator = std.mem.Allocator;
@@ -11,6 +12,25 @@ const Request = protocol.Request;
 const Response = protocol.Response;
 
 const buffer_size = 256 * 1024;
+const connect_retry_count = 100;
+const connect_retry_delay_ms = 50;
+
+const DaemonConnectError = error{
+    DaemonUnreachable,
+    NameTooLong,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    AddressFamilyUnsupported,
+    ProtocolUnsupportedBySystem,
+    SocketModeUnsupported,
+    AccessDenied,
+    PermissionDenied,
+    SymLinkLoop,
+    FileNotFound,
+    NotDir,
+    ReadOnlyFileSystem,
+};
 
 pub const Client = struct {
     io: std.Io,
@@ -22,27 +42,24 @@ pub const Client = struct {
     writer: net.Stream.Writer,
 
     pub fn init(self: *Client, allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
-        const addr = try net.UnixAddress.init(socket_path);
-        const stream = try addr.connect(io);
+        const stream = try quietConnect(socket_path);
         try self.finish(allocator, io, stream);
     }
 
     /// Connect, or spawn the daemon (`<self> daemon`, inheriting our environment
-    /// so it picks up the same CAIRN_* config) and connect once it is up. This
+    /// so it picks up the same AGENT_WAYMARK_* config) and connect once it is up. This
     /// is what makes the MCP bridge and the hooks "just work" without the user
     /// starting a daemon by hand.
     pub fn connectOrStart(self: *Client, allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
-        const addr = try net.UnixAddress.init(socket_path);
-        if (addr.connect(io)) |stream| {
+        if (quietConnect(socket_path)) |stream| {
             return self.finish(allocator, io, stream);
         } else |_| {}
 
         try spawnDaemon(allocator, io);
 
-        var tries: usize = 0;
-        while (tries < 100) : (tries += 1) {
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
-            if (addr.connect(io)) |stream| {
+        for (0..connect_retry_count) |_| {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(connect_retry_delay_ms), .awake) catch {};
+            if (quietConnect(socket_path)) |stream| {
                 return self.finish(allocator, io, stream);
             } else |_| {}
         }
@@ -80,6 +97,74 @@ pub const Client = struct {
         return protocol.readLine(Response, arena, &self.reader.interface);
     }
 };
+
+// Zig 0.16 logs ECONNREFUSED from Unix connect as Unexpected. Use the syscall
+// layer here so stale daemon sockets stay a normal retryable condition.
+fn quietConnect(socket_path: []const u8) DaemonConnectError!net.Stream {
+    const ua = try net.UnixAddress.init(socket_path);
+    const fd = try openSocket();
+    errdefer _ = posix.system.close(fd);
+
+    var storage: extern union {
+        any: posix.sockaddr,
+        un: posix.sockaddr.un,
+    } = undefined;
+    const addr_len = unixAddressToPosix(&ua, &storage);
+    try connectFd(fd, &storage.any, addr_len);
+
+    return .{ .socket = .{
+        .handle = fd,
+        .address = .{ .ip4 = .loopback(0) },
+    } };
+}
+
+fn openSocket() DaemonConnectError!posix.socket_t {
+    while (true) {
+        const rc = posix.system.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .INVAL => return error.ProtocolUnsupportedBySystem,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .PROTONOSUPPORT => return error.AddressFamilyUnsupported,
+            .PROTOTYPE => return error.SocketModeUnsupported,
+            else => return error.DaemonUnreachable,
+        }
+    }
+}
+
+fn connectFd(fd: posix.socket_t, addr: *const posix.sockaddr, addr_len: posix.socklen_t) DaemonConnectError!void {
+    while (true) {
+        switch (posix.errno(posix.system.connect(fd, addr, addr_len))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .CONNREFUSED => return error.DaemonUnreachable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .AGAIN, .INPROGRESS => return error.DaemonUnreachable,
+            .ACCES => return error.AccessDenied,
+            .LOOP => return error.SymLinkLoop,
+            .NOENT => return error.FileNotFound,
+            .NOTDIR => return error.NotDir,
+            .ROFS => return error.ReadOnlyFileSystem,
+            .PERM => return error.PermissionDenied,
+            else => return error.DaemonUnreachable,
+        }
+    }
+}
+
+fn unixAddressToPosix(a: *const net.UnixAddress, storage: anytype) posix.socklen_t {
+    storage.un.family = posix.AF.UNIX;
+    var path_len: usize = a.path.len;
+    @memcpy(storage.un.path[0..path_len], a.path);
+    if (storage.un.path.len - path_len > 0) {
+        storage.un.path[path_len] = 0;
+        path_len += 1;
+    }
+    return @intCast(@offsetOf(posix.sockaddr.un, "path") + path_len);
+}
 
 /// Spawn `<self-exe> daemon` detached, inheriting the current environment. The
 /// child outlives this process and is shared by every other client.

@@ -1,5 +1,5 @@
-//! Hook engine. Claude Code runs `cairn hook <Event>` for registered hooks,
-//! passing the event as JSON on stdin. This is where cairn does what a
+//! Hook engine. Agent clients run `agent-waymark hook <Event>` for registered hooks,
+//! passing the event as JSON on stdin. This is where agent-waymark does what a
 //! tool-only MCP server cannot: push context into the model before it responds.
 //!
 //!   SessionStart / SubagentStart  → inject the scope header (open todos +
@@ -38,15 +38,15 @@ const max_transcript_bytes = 24 * 1024;
 /// Embeddings are L2-normalized so scores are comparable across queries: real
 /// matches land ~0.5+, unrelated prompts ~0.35, so this stays silent on
 /// off-topic prompts instead of padding context with noise. Override with
-/// CAIRN_MIN_SCORE.
+/// AGENT_WAYMARK_MIN_SCORE.
 const default_min_score: f32 = 0.45;
 
 /// Re-surfaced at every SessionStart (and after compaction) so the agent keeps
-/// writing to cairn instead of letting the store go stale. The MCP server's
+/// writing to agent-waymark instead of letting the store go stale. The MCP server's
 /// instructions carry the same guidance; this repeats it where it is most
 /// likely to be acted on.
 const session_nudge =
-    "cairn is active. As you work, record decisions, dead ends, and todos " ++
+    "agent-waymark is active. As you work, record decisions, dead ends, and todos " ++
     "(record / supersede / done), and recall before re-investigating something, " ++
     "so this work carries to later sessions and sub-agents.";
 
@@ -79,13 +79,11 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
     // didn't record as it went. Swept entries are repo-wide. Injects nothing.
     if (std.mem.eql(u8, event, "PreCompact")) {
         const tpath = input.transcript_path orelse return;
-        const tail = readTail(a, io, tpath, max_transcript_bytes);
-        if (tail.len == 0) return;
-        _ = client.call(a, .{ .op = "sweep", .text = tail, .scope = scope.repo_scope }) catch return;
+        spawnSweepFile(allocator, io, tpath, scope.repo_scope) catch return;
         return;
     }
 
-    const min_score = if (env.get("CAIRN_MIN_SCORE")) |s|
+    const min_score = if (env.get("AGENT_WAYMARK_MIN_SCORE")) |s|
         std.fmt.parseFloat(f32, s) catch default_min_score
     else
         default_min_score;
@@ -119,6 +117,42 @@ fn readTail(a: Allocator, io: std.Io, path: []const u8, max: usize) []const u8 {
     return if (bytes.len <= max) bytes else bytes[bytes.len - max ..];
 }
 
+fn spawnSweepFile(allocator: Allocator, io: std.Io, transcript_path: []const u8, scope: []const u8) !void {
+    const exe = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ exe, "sweep-file", transcript_path, scope },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    _ = &child;
+}
+
+/// Detached PreCompact worker. This may spend time in local generation and
+/// embeddings, so hooks launch it out-of-band and return immediately.
+pub fn runSweepFile(allocator: Allocator, io: std.Io, cfg: daemon.Config, args: []const []const u8) void {
+    sweepFile(allocator, io, cfg, args) catch return;
+}
+
+fn sweepFile(allocator: Allocator, io: std.Io, cfg: daemon.Config, args: []const []const u8) !void {
+    if (args.len < 2) return;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const tail = readTail(a, io, args[0], max_transcript_bytes);
+    if (tail.len == 0) return;
+
+    var client: Client = undefined;
+    client.connectOrStart(allocator, io, cfg.socket_path) catch return;
+    defer client.deinit();
+
+    _ = client.call(a, .{ .op = "sweep", .text = tail, .scope = args[1] }) catch return;
+}
+
 /// The always-on scope header for SessionStart / SubagentStart.
 fn headerContext(a: Allocator, client: *Client, scope: []const u8) ![]const u8 {
     const parsed = try client.call(a, .{ .op = "header", .scope = scope, .limit = 5 });
@@ -139,7 +173,7 @@ fn recallContext(a: Allocator, client: *Client, scope: []const u8, prompt: []con
     var shown: usize = 0;
     for (hits) |h| {
         if (h.score < min_score) continue; // hits are sorted desc, so this is the tail
-        if (shown == 0) try w.writeAll("Possibly relevant prior context from cairn (recall to confirm):\n");
+        if (shown == 0) try w.writeAll("Possibly relevant prior context from agent-waymark (recall to confirm):\n");
         try w.print("- #{d} [{s}] {s}\n", .{ h.id, h.kind, h.body });
         shown += 1;
     }
@@ -147,8 +181,8 @@ fn recallContext(a: Allocator, client: *Client, scope: []const u8, prompt: []con
     return out.toOwnedSlice();
 }
 
-/// Emit the hook result: additionalContext is injected into the model's context
-/// as a system reminder.
+/// Emit the hook result: current Claude Code and Codex builds consume this
+/// additionalContext payload and inject it into the model's context.
 fn emit(io: std.Io, a: Allocator, event: []const u8, text: []const u8) !void {
     const Out = struct {
         hookSpecificOutput: struct {

@@ -9,7 +9,7 @@
 //!
 //! The root is the git toplevel (so subdirectories and worktrees of one repo
 //! share state). The repo's default branch and non-git directories collapse to
-//! repo-wide. An explicit CAIRN_SCOPE overrides everything.
+//! repo-wide. An explicit AGENT_WAYMARK_SCOPE overrides everything.
 //!
 //! Detection reads `.git` directly rather than spawning git, to keep the
 //! per-prompt hook fast.
@@ -25,7 +25,7 @@ pub const Info = struct {
 };
 
 pub fn detect(a: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, cwd_override: ?[]const u8) Info {
-    if (env.get("CAIRN_SCOPE")) |s| return .{ .repo_scope = s, .branch_scope = s };
+    if (env.get("AGENT_WAYMARK_SCOPE")) |s| return .{ .repo_scope = s, .branch_scope = s };
 
     const cwd = cwd_override orelse (std.process.currentPathAlloc(io, a) catch return flat(""));
     const root = findGitRoot(a, io, cwd) orelse

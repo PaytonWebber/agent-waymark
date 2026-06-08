@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Cross-compile cairn for every supported platform and lay out the release
+// Cross-compile agent-waymark for every supported platform and lay out the release
 // artifacts:
-//   npm/<key>/        a publishable @cairn/<key> platform package (optionalDep)
+//   npm/<key>/        a publishable @agent-waymark/<key> platform package (optionalDep)
 //   binaries/<key>/   the same binary, bundled into the Claude plugin
 //
 // Run from the repo root: `node scripts/build-dist.mjs` (set ZIG to the Zig 0.16
@@ -36,23 +36,23 @@ for (const [key, t] of Object.entries(TARGETS)) {
     cwd: root,
     stdio: "inherit",
   });
-  const built = join(prefix, "bin", "cairn");
+  const built = join(prefix, "bin", "agent-waymark");
 
-  // npm platform package: npm/<key>/{package.json, bin/cairn}
+  // npm platform package: npm/<key>/{package.json, bin/agent-waymark}
   const npmBin = join(root, "npm", key, "bin");
   mkdirSync(npmBin, { recursive: true });
-  copyFileSync(built, join(npmBin, "cairn"));
-  chmodSync(join(npmBin, "cairn"), 0o755);
+  copyFileSync(built, join(npmBin, "agent-waymark"));
+  chmodSync(join(npmBin, "agent-waymark"), 0o755);
   writeFileSync(
     join(root, "npm", key, "package.json"),
     JSON.stringify(
       {
-        name: `@cairn/${key}`,
+        name: `@agent-waymark/${key}`,
         version,
-        description: `cairn native binary for ${key}`,
+        description: `agent-waymark native binary for ${key}`,
         os: [t.os],
         cpu: [t.cpu],
-        files: ["bin/cairn"],
+        files: ["bin/agent-waymark"],
         license: pkg.license,
       },
       null,
@@ -60,14 +60,14 @@ for (const [key, t] of Object.entries(TARGETS)) {
     ) + "\n",
   );
 
-  // Plugin bundle: binaries/<key>/cairn
+  // Plugin bundle: binaries/<key>/agent-waymark
   const plugBin = join(root, "binaries", key);
   mkdirSync(plugBin, { recursive: true });
-  copyFileSync(built, join(plugBin, "cairn"));
-  chmodSync(join(plugBin, "cairn"), 0o755);
+  copyFileSync(built, join(plugBin, "agent-waymark"));
+  chmodSync(join(plugBin, "agent-waymark"), 0o755);
 }
 
 rmSync(join(root, ".dist"), { recursive: true, force: true });
 console.log(`\ndone. built ${Object.keys(TARGETS).length} platforms at version ${version}.`);
-console.log("npm/      -> publish each @cairn/<key>, then the main package");
+console.log("npm/      -> publish each @agent-waymark/<key>, then the main package");
 console.log("binaries/ -> commit for the Claude plugin (git-source install)");

@@ -1,8 +1,15 @@
 .zig-cache/
 zig-out/
 *.sock
-cairn-state.json
-cairn-state.json.tmp
+agent-waymark-state.json
+agent-waymark-state.json.tmp
+.agent-waymark/
+.codex/
+PLAN.md
+CLAUDE.md
+AGENTS.md
+.agents/
+.claude/
 
 # Build artifacts (produced by scripts/build-dist.mjs at release time)
 node_modules/

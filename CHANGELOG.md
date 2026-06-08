@@ -16,7 +16,7 @@ First release.
 - The MCP server instructions and SessionStart nudge prompt the agent to record
   as it works; the embedder is kept warm (`keep_alive`) to avoid cold-load
   latency on the per-prompt hook.
-- `cairn install` merges the MCP server + hooks into Claude Code config
+- `agent-waymark install` merges the MCP server + hooks into Claude Code config
   (project or `--user`), preserving existing config and idempotent on re-run.
 - Entry lifecycle: `done`/resolve, supersede chain-head resolution with ref
   inheritance, and pin/unpin so foundational entries stay in the header.

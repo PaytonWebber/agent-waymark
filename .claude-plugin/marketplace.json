@@ -1,10 +1,10 @@
 {
-  "name": "cairn",
+  "name": "agent-waymark",
   "owner": { "name": "Payton Webber" },
-  "description": "cairn: durable shared working-state for agent orchestration.",
+  "description": "Agent Waymark: durable shared working-state for agent orchestration.",
   "plugins": [
     {
-      "name": "cairn",
+      "name": "agent-waymark",
       "source": ".",
       "description": "Records decisions/findings/rejected-paths/todos and injects the relevant ones into every session and prompt.",
       "license": "MIT"

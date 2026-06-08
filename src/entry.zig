@@ -1,6 +1,6 @@
 //! The unit of shared state: a structured entry left by one agent/session for
 //! the next. `kind` and `supersedes` are what make this orchestration state
-//! rather than a flat fact store — `rejected` keeps dead ends visible, and
+//! rather than a flat fact store. `rejected` keeps dead ends visible, and
 //! `decision` + `supersedes` preserves the temporal chain of how a choice
 //! changed, instead of flattening everything into an embedding.
 

@@ -3,7 +3,7 @@
 //! quantal stores raw f32 vectors only, so text must be embedded before it
 //! reaches the index. We call Ollama's `/api/embeddings` endpoint (no API key,
 //! runs offline). The vector dimension is fixed at build time (`build_options.dim`)
-//! because the quantal index type bakes it in at comptime — it MUST match the
+//! because the quantal index type bakes it in at comptime. It MUST match the
 //! model (`nomic-embed-text` = 768).
 
 const std = @import("std");

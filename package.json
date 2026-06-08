@@ -1,15 +1,16 @@
 {
-  "name": "cairn",
+  "name": "agent-waymark",
   "version": "0.1.0",
-  "description": "Durable shared working-state for agent orchestration: an MCP server plus Claude Code hooks that inject project decisions, findings, and todos so sessions and sub-agents stop re-deriving them.",
+  "description": "Durable shared working-state for agent orchestration: an MCP server plus Claude Code and Codex hooks that inject project decisions, findings, and todos so sessions and sub-agents stop re-deriving them.",
   "type": "commonjs",
   "bin": {
-    "cairn": "bin/cli.js"
+    "agent-waymark": "bin/cli.js"
   },
   "files": [
     "bin/cli.js",
     "lib/get-binary-path.js",
     ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
     ".mcp.json",
     "hooks/hooks.json",
     "README.md",
@@ -19,22 +20,23 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@cairn/linux-x64": "0.1.0",
-    "@cairn/linux-arm64": "0.1.0",
-    "@cairn/darwin-arm64": "0.1.0",
-    "@cairn/darwin-x64": "0.1.0"
+    "@agent-waymark/linux-x64": "0.1.0",
+    "@agent-waymark/linux-arm64": "0.1.0",
+    "@agent-waymark/darwin-arm64": "0.1.0",
+    "@agent-waymark/darwin-x64": "0.1.0"
   },
   "keywords": [
     "claude",
     "claude-code",
+    "codex",
     "mcp",
     "agent",
     "memory",
     "orchestration"
   ],
   "author": "Payton Webber",
-  "repository": { "type": "git", "url": "git+https://github.com/PaytonWebber/cairn.git" },
-  "homepage": "https://github.com/PaytonWebber/cairn#readme",
-  "bugs": { "url": "https://github.com/PaytonWebber/cairn/issues" },
+  "repository": { "type": "git", "url": "git+https://github.com/PaytonWebber/agent-waymark.git" },
+  "homepage": "https://github.com/PaytonWebber/agent-waymark#readme",
+  "bugs": { "url": "https://github.com/PaytonWebber/agent-waymark/issues" },
   "license": "MIT"
 }

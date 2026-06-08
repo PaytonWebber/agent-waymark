@@ -1,17 +1,17 @@
-//! cairn — durable shared working-state for agent orchestration.
+//! agent-waymark: durable shared working-state for agent orchestration.
 //!
-//! One binary, two roles. `cairn daemon` runs the long-lived store owner;
+//! One binary, two roles. `agent-waymark daemon` runs the long-lived store owner;
 //! every other subcommand is a thin client that connects to it over a unix
 //! socket. The MCP bridge (phase 2) and hook kit (phase 3) are additional
 //! clients of the same daemon.
 //!
-//!   cairn daemon
-//!   cairn ping
-//!   cairn record <kind> <body> [--scope S] [--author A] [--supersedes N]
-//!   cairn recall <query>        [--scope S] [--kind K] [--limit N]
-//!   cairn timeline              [--scope S] [--kind K] [--limit N]
-//!   cairn header                [--scope S] [--limit N]
-//!   cairn forget <id>
+//!   agent-waymark daemon
+//!   agent-waymark ping
+//!   agent-waymark record <kind> <body> [--scope S] [--author A] [--supersedes N]
+//!   agent-waymark recall <query>        [--scope S] [--kind K] [--limit N]
+//!   agent-waymark timeline              [--scope S] [--kind K] [--limit N]
+//!   agent-waymark header                [--scope S] [--limit N]
+//!   agent-waymark forget <id>
 
 const std = @import("std");
 const sdk = @import("zig_mcp_sdk");
@@ -24,12 +24,13 @@ const mcp = @import("mcp.zig");
 const hooks = @import("hooks.zig");
 const scope_mod = @import("scope.zig");
 const install_mod = @import("install.zig");
+const doctor = @import("doctor.zig");
 
 const Client = client_mod.Client;
 const Request = protocol.Request;
 
-const default_socket = "/tmp/cairn.sock";
-const default_store = "cairn-state.json";
+const default_socket = "/tmp/agent-waymark.sock";
+const default_store = "agent-waymark-state.json";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -47,18 +48,18 @@ pub fn main(init: std.process.Init) !void {
     const args = argv.items[2..];
 
     const cfg: daemon.Config = .{
-        .socket_path = env.get("CAIRN_SOCKET") orelse default_socket,
-        .store_path = env.get("CAIRN_STORE") orelse default_store,
+        .socket_path = env.get("AGENT_WAYMARK_SOCKET") orelse default_socket,
+        .store_path = env.get("AGENT_WAYMARK_STORE") orelse default_store,
         .embed = .{
-            .url = env.get("CAIRN_EMBED_URL") orelse embedder.Config.default_url,
-            .model = env.get("CAIRN_EMBED_MODEL") orelse embedder.Config.default_model,
-            .keep_alive = env.get("CAIRN_EMBED_KEEP_ALIVE") orelse embedder.Config.default_keep_alive,
+            .url = env.get("AGENT_WAYMARK_EMBED_URL") orelse embedder.Config.default_url,
+            .model = env.get("AGENT_WAYMARK_EMBED_MODEL") orelse embedder.Config.default_model,
+            .keep_alive = env.get("AGENT_WAYMARK_EMBED_KEEP_ALIVE") orelse embedder.Config.default_keep_alive,
         },
         .extract = .{
-            .url = env.get("CAIRN_EXTRACT_URL") orelse extractor.Config.default_url,
-            .model = env.get("CAIRN_EXTRACT_MODEL") orelse extractor.Config.default_model,
+            .url = env.get("AGENT_WAYMARK_EXTRACT_URL") orelse extractor.Config.default_url,
+            .model = env.get("AGENT_WAYMARK_EXTRACT_MODEL") orelse extractor.Config.default_model,
         },
-        .sweep_dedup = if (env.get("CAIRN_SWEEP_DEDUP")) |s|
+        .sweep_dedup = if (env.get("AGENT_WAYMARK_SWEEP_DEDUP")) |s|
             std.fmt.parseFloat(f32, s) catch daemon.default_sweep_dedup
         else
             daemon.default_sweep_dedup,
@@ -73,8 +74,14 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "hook")) {
         return hooks.run(allocator, io, env, cfg, if (args.len > 0) args[0] else "");
     }
+    if (std.mem.eql(u8, cmd, "sweep-file")) {
+        return hooks.runSweepFile(allocator, io, cfg, args);
+    }
     if (std.mem.eql(u8, cmd, "install")) {
         return install_mod.run(allocator, io, env, args);
+    }
+    if (std.mem.eql(u8, cmd, "doctor")) {
+        return doctor.run(allocator, io, env, cfg, args);
     }
 
     var req = buildRequest(cmd, args) catch |err| {
@@ -97,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
 
     var client: Client = undefined;
     client.connectOrStart(allocator, io, cfg.socket_path) catch {
-        fatal("could not reach or start the cairn daemon at {s}", .{cfg.socket_path});
+        fatal("could not reach or start the agent-waymark daemon at {s}", .{cfg.socket_path});
     };
     defer client.deinit();
 
@@ -107,33 +114,35 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// Run the MCP bridge over stdio as a thin client of the daemon (auto-started
-/// if needed). Claude Code launches this with `command: cairn mcp`.
+/// if needed). Claude Code launches this with `command: agent-waymark mcp`.
 fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: daemon.Config) !void {
     var client: Client = undefined;
     try client.connectOrStart(allocator, io, cfg.socket_path);
     defer client.deinit();
 
-    const info = scope_mod.detect(allocator, io, env, null);
+    var scope_arena = std.heap.ArenaAllocator.init(allocator);
+    defer scope_arena.deinit();
+    const info = scope_mod.detect(scope_arena.allocator(), io, env, null);
     var handler: mcp.Handler = .{
         .client = &client,
         .repo_scope = info.repo_scope,
         .branch_scope = info.branch_scope,
-        .author = env.get("CAIRN_AUTHOR") orelse "claude-code",
+        .author = env.get("AGENT_WAYMARK_AUTHOR") orelse "claude-code",
     };
     var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
-        .server_info = .{ .name = "cairn", .version = "0.0.0" },
+        .server_info = .{ .name = "agent-waymark", .version = "0.1.0" },
         .capabilities = .{ .tools = .{} },
         .instructions =
-            \\Shared working-state for this project, so work carries across
-            \\sessions and sub-agents. Be proactive about writing to it:
-            \\  - When you make an architectural decision, hit a dead end, learn
-            \\    a non-obvious fact, or take on a task, record it (record /
-            \\    supersede / done). Capture decisions and dead ends, not every
-            \\    thought.
-            \\  - Before investigating something non-trivial, recall first to see
-            \\    if it was already decided or tried.
-            \\Relevant prior entries are injected automatically at session start
-            \\and on each prompt; build on them instead of starting cold.
+        \\Shared working-state for this project, so work carries across
+        \\sessions and sub-agents. Be proactive about writing to it:
+        \\  - When you make an architectural decision, hit a dead end, learn
+        \\    a non-obvious fact, or take on a task, record it (record /
+        \\    supersede / done). Capture decisions and dead ends, not every
+        \\    thought.
+        \\  - Before investigating something non-trivial, recall first to see
+        \\    if it was already decided or tried.
+        \\Relevant prior entries are injected automatically at session start
+        \\and on each prompt; build on them instead of starting cold.
         ,
     });
     try server.start(io);
@@ -255,21 +264,24 @@ fn printResponse(io: std.Io, resp: protocol.Response) !void {
 
 fn usage() void {
     std.debug.print(
-        \\cairn — shared working-state for agent orchestration
+        \\agent-waymark: shared working-state for agent orchestration
         \\
-        \\  cairn install [--user]      register the MCP server + hooks with Claude Code
-        \\  cairn daemon                run the store owner (auto-started otherwise)
-        \\  cairn mcp                   run the MCP bridge over stdio
-        \\  cairn hook <Event>          run a hook (reads the event JSON on stdin)
+        \\  agent-waymark install [--user] [--global-mcp] [--store PATH]
+        \\                                     register the MCP server + hooks with Claude Code
+        \\  agent-waymark install --codex      register the MCP server + hooks with Codex
+        \\  agent-waymark doctor [--json]       check daemon reachability and project config
+        \\  agent-waymark daemon                run the store owner (auto-started otherwise)
+        \\  agent-waymark mcp                   run the MCP bridge over stdio
+        \\  agent-waymark hook <Event>          run a hook (reads the event JSON on stdin)
         \\
-        \\  cairn ping
-        \\  cairn record <kind> <body> [--scope S] [--author A] [--supersedes N]
-        \\  cairn recall <query>        [--scope S] [--kind K] [--limit N]
-        \\  cairn timeline              [--scope S] [--kind K] [--limit N]
-        \\  cairn header                [--scope S] [--limit N]
-        \\  cairn done <id>             mark a todo done (kept for history)
-        \\  cairn pin <id> | unpin <id> always show an entry in the header
-        \\  cairn forget <id>
+        \\  agent-waymark ping
+        \\  agent-waymark record <kind> <body> [--scope S] [--author A] [--supersedes N]
+        \\  agent-waymark recall <query>        [--scope S] [--kind K] [--limit N]
+        \\  agent-waymark timeline              [--scope S] [--kind K] [--limit N]
+        \\  agent-waymark header                [--scope S] [--limit N]
+        \\  agent-waymark done <id>             mark a todo done (kept for history)
+        \\  agent-waymark pin <id> | unpin <id> always show an entry in the header
+        \\  agent-waymark forget <id>
         \\
         \\kinds: decision finding rejected todo artifact note
         \\
@@ -284,5 +296,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 test {
     _ = @import("store.zig");
     _ = @import("protocol.zig");
+    _ = @import("install.zig");
+    _ = @import("doctor.zig");
     _ = @import("store_test.zig");
 }

@@ -1,12 +1,10 @@
-# cairn
+# Agent Waymark
 
 Durable, shared working-state for agent orchestration. Not another semantic
-memory store. The unit of state is a structured **entry** — a decision, a
-finding, a rejected path, a todo — that one agent, sub-agent, or session leaves
+memory store. The unit of state is a structured **entry**: a decision, a
+finding, a rejected path, or a todo that one agent, sub-agent, or session leaves
 for the next, so they stop re-discovering and re-deciding what an earlier one
 already worked out.
-
-> Working name. Branding is not final.
 
 ## Why
 
@@ -16,37 +14,54 @@ compaction, and sub-agents re-solving what the parent already solved. Two facts
 shape the design:
 
 - An MCP server can't inject context on its own; it only answers tool calls the
-  model chooses to make, which is why memory MCPs so often go unused. Only
-  Claude Code **hooks** can push context into the model before it responds. So
-  cairn is an MCP server **plus a hook kit** — the hooks are the point.
+  model chooses to make, which is why memory MCPs so often go unused. Agent
+  **hooks** can push context into the model before it responds. So agent-waymark is an
+  MCP server **plus a hook kit**. The hooks are the point.
 - A user's main session and its sub-agents are separate processes, so none of
   them can own the store without corrupting it. A single **daemon owns the
   store**; everything else is a thin client. Add auth and a network bind and the
   same daemon is a team server.
 
-See [PLAN.md](PLAN.md) for the architecture and roadmap.
+## Prerequisites
 
-## Requirements
+Supported platforms:
 
-A local [Ollama](https://ollama.com) with an embedding model:
+- Linux x64
+- Linux arm64
+- macOS Apple Silicon
+- macOS Intel
+
+Runtime requirements:
+
+- Node.js 18 or newer for the npm launcher and plugin bundle.
+- A local [Ollama](https://ollama.com) server.
+- The `nomic-embed-text` Ollama model. This is the default embedding model and
+  must match the 768-dimensional index build.
 
 ```bash
 ollama pull nomic-embed-text   # 768-d, the default (required, for recall)
-ollama pull llama3.2           # optional: enables the PreCompact sweep
 ```
 
-The second model is only for the `PreCompact` sweep; without it, that hook
-no-ops and everything else works. Supported platforms: Linux (x64, arm64) and
-macOS (Apple Silicon, Intel).
+Optional:
+
+```bash
+ollama pull llama3.2           # enables the PreCompact extraction sweep
+```
+
+Without the optional extraction model, `PreCompact` no-ops and everything else
+works. To build from source, install Zig 0.16 and Node.js 18 or newer.
 
 ## Install
 
 ### As a Claude Code plugin (recommended)
 
 ```
-/plugin marketplace add PaytonWebber/cairn
-/plugin install cairn@cairn
+/plugin marketplace add PaytonWebber/agent-waymark
+/plugin install agent-waymark@agent-waymark
 ```
+
+Restart Claude Code after installing. Use `/mcp` to confirm the MCP server is
+connected.
 
 This registers both halves, which is the whole point of the design:
 
@@ -63,29 +78,95 @@ This registers both halves, which is the whole point of the design:
   - `PreCompact` extracts decisions, findings, and todos from the session
     transcript with a local chat model and records the new ones, so state
     survives even when nothing was recorded by hand. Best-effort and opt-in by
-    model availability (see below); it no-ops if no extraction model is present.
+    model availability (see below); it runs in a detached worker and no-ops if
+    no extraction model is present.
 
 ### As a CLI (npm)
 
 ```bash
-npm install -g cairn
+npm install -g agent-waymark
 ```
 
-Gives you the `cairn` command. To wire a project (or all projects) into Claude
-Code without the plugin, `cairn install` merges the MCP server and hooks into
-your Claude Code config (idempotent, preserves existing hooks):
+This gives you the `agent-waymark` command. To wire a project, run:
 
 ```bash
-cairn install            # this project: .claude/settings.json + .mcp.json
-cairn install --user     # every project: ~/.claude/settings.json
+agent-waymark install
 ```
+
+That writes `.claude/settings.json` and `.mcp.json` in the current project. It
+preserves existing config and replaces only agent-waymark's own entries on
+repeat runs.
+
+To install Claude hooks and the MCP server at user scope:
+
+```bash
+agent-waymark install --user
+```
+
+That writes `~/.claude/settings.json` and `~/.claude.json`. To keep hooks in the
+current project but register the MCP server globally:
+
+```bash
+agent-waymark install --global-mcp
+```
+
+To choose the daemon snapshot location, pass `--store PATH`:
+
+```bash
+agent-waymark install --store ~/.agent-waymark/work-state.json
+```
+
+The installer also derives the Unix socket path from that file
+(`PATH.sock`) and generates commands that create the parent directory before
+starting the daemon. Use the same flag with `--codex`, `--user`, or
+`--global-mcp`.
+
+For Codex, run:
+
+```bash
+agent-waymark install --codex
+```
+
+That writes `.codex/config.toml` and `.codex/hooks.json` in the current project.
+For a user-level Codex install, run `agent-waymark install --codex --user`.
+To keep project hooks but register the Codex MCP server globally, run
+`agent-waymark install --codex --global-mcp`.
+Codex requires non-managed command hooks to be reviewed and trusted before they
+run; after installing, restart Codex and use `/hooks` to trust agent-waymark's hooks.
+The Codex installer keeps daemon state in the current repo's `.agent-waymark/`
+directory (`.agent-waymark/agent-waymark.sock` and `.agent-waymark/agent-waymark-state.json`) instead of `/tmp`,
+so the config stays workspace-local. Some sandboxed shell surfaces may still
+require approval for Unix socket binding; after restart, verify Codex sees agent-waymark
+with `/mcp` and `/hooks`. The hook config uses Codex's documented hook
+events/trust flow and the `additionalContext` output shape verified in current
+Codex sessions.
 
 ### From source
 
 ```bash
-zig build                # build the `cairn` binary (Zig 0.16)
+zig build                # build the `agent-waymark` binary (Zig 0.16)
 zig build test           # unit tests (offline, no Ollama)
+zig build integration    # daemon + MCP + hook smoke test (offline, no Ollama)
 ```
+
+The integration smoke test also requires Node.js 18 or newer.
+
+Run `agent-waymark doctor` from a project to check the effective socket/store paths,
+daemon reachability, and whether Claude/Codex project config contains agent-waymark
+entries. Use `agent-waymark doctor --json` for CI or package smoke tests.
+
+## Quick Check
+
+After installing and restarting your agent client:
+
+```bash
+agent-waymark doctor
+agent-waymark record decision "use agent-waymark for project state"
+agent-waymark recall "project state"
+```
+
+If Ollama is not running, `record` and `recall` will report an embedding service
+error. Start Ollama and try again.
 
 ### Scoping
 
@@ -93,7 +174,7 @@ State is scoped to the **git repository** (the toplevel, so subdirectories and
 worktrees of one repo share it). Within a repo, scope is hierarchical:
 
 - **Repo-wide** (`repo:<root>`) is the default for writes and is visible from
-  every branch — this is where durable decisions, findings, and rejected paths
+  every branch. This is where durable decisions, findings, and rejected paths
   live.
 - **Branch-local** (`repo:<root>/branch/<name>`) is opt-in (`--branch-local`, or
   the `branch_local` tool arg) for work specific to a feature branch. It shows
@@ -103,7 +184,7 @@ worktrees of one repo share it). Within a repo, scope is hierarchical:
 Reads run at the current branch and return repo-wide plus current-branch
 entries. The default branch (detected from the remote's `origin/HEAD`, falling
 back to `main`/`master` for local-only repos) is treated as repo-wide. Outside a
-git repo, everything is repo-wide for that directory. `CAIRN_SCOPE` overrides
+git repo, everything is repo-wide for that directory. `AGENT_WAYMARK_SCOPE` overrides
 detection with a fixed scope.
 
 ### CLI
@@ -113,34 +194,35 @@ repo-wide by default; add `--branch-local` for branch-specific entries. Pass
 `--scope ""` to span all scopes.
 
 ```bash
-cairn record decision "use a daemon to own the store"
-cairn record todo "wire up the new endpoint" --branch-local
-cairn recall  "who owns the store?"
-cairn timeline
-cairn header                        # the always-on session summary
-cairn done <id>                     # finish a todo (kept for history)
-cairn pin <id>                      # always show an entry in the header
-cairn unpin <id>
+agent-waymark record decision "use a daemon to own the store"
+agent-waymark record todo "wire up the new endpoint" --branch-local
+agent-waymark recall  "who owns the store?"
+agent-waymark timeline
+agent-waymark header                        # the always-on session summary
+agent-waymark done <id>                     # finish a todo (kept for history)
+agent-waymark pin <id>                      # always show an entry in the header
+agent-waymark unpin <id>
 ```
 
-Environment knobs: `CAIRN_SOCKET`, `CAIRN_STORE` (socket/snapshot paths);
-`CAIRN_EMBED_URL`, `CAIRN_EMBED_MODEL`, `CAIRN_EMBED_KEEP_ALIVE` (embedding
-endpoint/model and warm-up window); `CAIRN_SCOPE`, `CAIRN_AUTHOR`; `CAIRN_MIN_SCORE`
+Environment knobs: `AGENT_WAYMARK_SOCKET`, `AGENT_WAYMARK_STORE` (socket/snapshot paths);
+`AGENT_WAYMARK_EMBED_URL`, `AGENT_WAYMARK_EMBED_MODEL`, `AGENT_WAYMARK_EMBED_KEEP_ALIVE` (embedding
+endpoint/model and warm-up window); `AGENT_WAYMARK_SCOPE`, `AGENT_WAYMARK_AUTHOR`; `AGENT_WAYMARK_MIN_SCORE`
 (recall floor for the prompt hook); and for the PreCompact sweep,
-`CAIRN_EXTRACT_URL`, `CAIRN_EXTRACT_MODEL` (default `llama3.2`), and
-`CAIRN_SWEEP_DEDUP` (cosine above which a swept entry is treated as already
+`AGENT_WAYMARK_EXTRACT_URL`, `AGENT_WAYMARK_EXTRACT_MODEL` (default `llama3.2`), and
+`AGENT_WAYMARK_SWEEP_DEDUP` (cosine above which a swept entry is treated as already
 known, default `0.85`).
 
-The sweep is best-effort: extraction quality scales with `CAIRN_EXTRACT_MODEL`
-(a small model may miss entries or occasionally record a paraphrase of one
-already stored), so use a capable local model for it.
+The sweep is best-effort and runs after the PreCompact hook returns, so slow
+local generation cannot block compaction. Extraction quality scales with
+`AGENT_WAYMARK_EXTRACT_MODEL` (a small model may miss entries or occasionally
+record a paraphrase of one already stored), so use a capable local model for it.
 
 ### Latency
 
 The `UserPromptSubmit` hook embeds each prompt before the turn proceeds. With a
 warm model that is ~20-30ms; the only slow case is a cold load after an idle
-gap, which `CAIRN_EMBED_KEEP_ALIVE` (default `30m`) is there to avoid. If you
-want it faster still, point `CAIRN_EMBED_MODEL` at a smaller model (e.g.
+gap, which `AGENT_WAYMARK_EMBED_KEEP_ALIVE` (default `30m`) is there to avoid. If you
+want it faster still, point `AGENT_WAYMARK_EMBED_MODEL` at a smaller model (e.g.
 `all-minilm`); the query and stored vectors must use the same model, so delete
 the store (or re-record) when you switch.
 

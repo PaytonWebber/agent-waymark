@@ -1,4 +1,4 @@
-//! MCP bridge: exposes cairn's tools to an agent over stdio, as a thin client
+//! MCP bridge: exposes agent-waymark's tools to an agent over stdio, as a thin client
 //! of the daemon. The model writes and reads orchestration state through these
 //! tools; the hook kit (phase 3) handles automatic injection, which is the
 //! part a tool-only server can't do.
@@ -252,7 +252,7 @@ fn formatHit(a: Allocator, h: protocol.HitJson, show_score: bool) ![]u8 {
 }
 
 fn daemonDown(a: Allocator) !types.CallToolResult {
-    return types.CallToolResult.err(a, "the cairn daemon is unreachable");
+    return types.CallToolResult.err(a, "the agent-waymark daemon is unreachable");
 }
 
 fn clamp(v: i64, lo: i64, hi: i64) usize {

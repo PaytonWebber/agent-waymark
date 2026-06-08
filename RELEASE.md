@@ -1,11 +1,11 @@
-# Releasing cairn
+# Releasing agent-waymark
 
-cairn ships through two channels from one repo:
+agent-waymark ships through two channels from one repo:
 
-- **npm** — `npm i -g cairn` installs the `cairn` CLI. The native binary is
-  delivered as a per-platform optional dependency (`@cairn/<platform>`), selected
+- **npm**: `npm i -g agent-waymark` installs the `agent-waymark` CLI. The native binary is
+  delivered as a per-platform optional dependency (`@agent-waymark/<platform>`), selected
   automatically; `bin/cli.js` execs it.
-- **Claude Code plugin** — a git-source plugin that bundles the per-platform
+- **Claude Code plugin**: a git-source plugin that bundles the per-platform
   binaries under `binaries/` and launches them with `node bin/cli.js`. Installs
   via a marketplace.
 
@@ -15,24 +15,7 @@ Windows is not supported yet (the daemon uses unix domain sockets).
 Runtime prerequisite for users: a local [Ollama](https://ollama.com) with an
 embedding model (`ollama pull nomic-embed-text`, the 768-d default).
 
-## Step 0 — the name (do this first)
-
-The project name is currently the placeholder `cairn`. Pick the final name and
-replace it everywhere before publishing. The user-facing identifiers are:
-
-- npm: `name` in `package.json`, the `@cairn` scope in `optionalDependencies`
-  and in `lib/get-binary-path.js` (the `PLATFORMS` map) and `scripts/build-dist.mjs`.
-- plugin: `name` in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`,
-  and the MCP server key `cairn` in `.mcp.json`.
-- Zig: `name` in `build.zig.zon`; the binary name in `build.zig` (`addExecutable`)
-  and every place the build script copies `bin/cairn`.
-- repo/homepage URLs in `package.json` / `plugin.json` / `marketplace.json`.
-
-The launcher resolves a binary literally named `cairn`; if you rename the binary,
-update `binaryName()` / the copy paths together. Everything else (internal Zig
-module names, the on-disk store format) can stay as-is.
-
-## Step 1 — build the binaries
+## Step 1: build the binaries
 
 ```bash
 ZIG=/path/to/zig-0.16 node scripts/build-dist.mjs
@@ -40,10 +23,10 @@ ZIG=/path/to/zig-0.16 node scripts/build-dist.mjs
 
 This cross-compiles all four platforms and writes:
 
-- `npm/<platform>/` — the publishable `@<scope>/<platform>` packages.
-- `binaries/<platform>/` — the same binaries, for the plugin bundle.
+- `npm/<platform>/`: the publishable `@agent-waymark/<platform>` packages.
+- `binaries/<platform>/`: the same binaries, for the plugin bundle.
 
-## Step 2 — publish to npm
+## Step 2: publish to npm
 
 Publish the platform packages first so the main package's optional dependencies
 already exist, then the main package:
@@ -58,7 +41,7 @@ npm publish .
 Validate without publishing first with `npm pack --dry-run` (and inspect a
 platform tarball with `tar -tzf`).
 
-## Step 3 — publish the plugin
+## Step 3: publish the plugin
 
 The git-source plugin needs the binaries committed (plugins have no install
 step):
@@ -88,6 +71,6 @@ default.
 ## Verify
 
 - `npm pack --dry-run` lists `bin/cli.js`, `lib/`, the plugin manifests.
-- In a scratch dir: install the packed tarballs and run `npx cairn ping`.
+- In a scratch dir: install the packed tarballs and run `npx agent-waymark ping`.
 - Plugin: `claude --plugin-dir .` in a checkout with `binaries/` present, then
-  `/mcp` shows cairn connected and the SessionStart header appears.
+  `/mcp` shows agent-waymark connected and the SessionStart header appears.

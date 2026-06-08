@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "cairn": {
+    "agent-waymark": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/bin/cli.js", "mcp"]
     }

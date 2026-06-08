@@ -25,17 +25,24 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const exe = b.addExecutable(.{ .name = "cairn", .root_module = mod });
+    const exe = b.addExecutable(.{ .name = "agent-waymark", .root_module = mod });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the cairn CLI (pass args after --)");
+    const run_step = b.step("run", "Run the agent-waymark CLI (pass args after --)");
     run_step.dependOn(&run_cmd.step);
 
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    const integration = b.addSystemCommand(&.{"node"});
+    integration.addFileArg(b.path("scripts/integration-smoke.mjs"));
+    integration.addArtifactArg(exe);
+    integration.addArg(b.fmt("{d}", .{dim}));
+    const integration_step = b.step("integration", "Run daemon/MCP/hook integration smoke tests");
+    integration_step.dependOn(&integration.step);
 }

@@ -8,7 +8,7 @@ const Store = store_mod.Store;
 
 const dim = embedder.dim;
 
-/// A unit vector with `1.0` at index `axis` — distinct axes are orthogonal, so
+/// A unit vector with `1.0` at index `axis`. Distinct axes are orthogonal, so
 /// inner-product ranking is predictable.
 fn axisVec(a: std.mem.Allocator, axis: usize) ![]f32 {
     const v = try a.alloc(f32, dim);
@@ -17,7 +17,7 @@ fn axisVec(a: std.mem.Allocator, axis: usize) ![]f32 {
     return v;
 }
 
-const test_path = "cairn-test.json";
+const test_path = "agent-waymark-test.json";
 
 fn cleanup(io: std.Io) void {
     const cwd = std.Io.Dir.cwd();
@@ -326,7 +326,7 @@ test "persistence survives reopen" {
         _ = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "another", .embedding = try axisVec(a, 4) });
     }
 
-    // Reopen from disk — vectors and metadata rebuild from the snapshot.
+    // Reopen from disk. Vectors and metadata rebuild from the snapshot.
     var store = try Store.init(testing.allocator, io, test_path);
     defer store.deinit();
     try testing.expectEqual(@as(usize, 2), store.count());

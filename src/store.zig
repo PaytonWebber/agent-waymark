@@ -3,7 +3,7 @@
 //! Holds an in-memory map of `id -> Entry` and a quantal vector index over the
 //! entry bodies' embeddings. The on-disk form is a single JSON snapshot that
 //! includes each embedding, so the vector index is a pure runtime structure
-//! rebuilt from the snapshot at startup — no separate index file to keep
+//! rebuilt from the snapshot at startup. There is no separate index file to keep
 //! consistent, and recovery needs no embedding service.
 //!
 //! Durability: every mutation rewrites the snapshot to a temp file and renames
@@ -262,7 +262,7 @@ pub const Store = struct {
 
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;
-        try w.print("## cairn state — {s}\n", .{if (scope.len > 0) scope else "all scopes"});
+        try w.print("## agent-waymark state: {s}\n", .{if (scope.len > 0) scope else "all scopes"});
         if (pinned.len > 0) {
             try w.writeAll("\nPinned:\n");
             for (pinned) |h| try writeHeaderLine(w, h);

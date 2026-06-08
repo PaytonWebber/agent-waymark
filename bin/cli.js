@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// Thin launcher: locate the platform-native cairn binary and exec it,
+// Thin launcher: locate the platform-native agent-waymark binary and exec it,
 // forwarding argv, stdio, and the exit code / terminating signal. spawnSync
 // (not execFileSync) so a non-zero exit propagates instead of throwing.
 
