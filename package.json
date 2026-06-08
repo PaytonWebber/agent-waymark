@@ -35,7 +35,7 @@
     "orchestration"
   ],
   "author": "Payton Webber",
-  "repository": { "type": "git", "url": "git+https://github.com/PaytonWebber/agent-waymark.git" },
+  "repository": { "type": "git", "url": "https://github.com/PaytonWebber/agent-waymark" },
   "homepage": "https://github.com/PaytonWebber/agent-waymark#readme",
   "bugs": { "url": "https://github.com/PaytonWebber/agent-waymark/issues" },
   "license": "MIT"
