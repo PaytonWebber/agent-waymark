@@ -1,0 +1,82 @@
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish npm packages
+    runs-on: ubuntu-latest
+    environment: npm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Verify tag matches package version
+        run: |
+          node <<'NODE'
+          const pkg = require("./package.json");
+          const tag = process.env.GITHUB_REF_NAME;
+          const expected = `v${pkg.version}`;
+          if (tag !== expected) {
+            console.error(`tag ${tag} does not match package version ${expected}`);
+            process.exit(1);
+          }
+          for (const [name, version] of Object.entries(pkg.optionalDependencies ?? {})) {
+            if (version !== pkg.version) {
+              console.error(`${name} is pinned to ${version}, expected ${pkg.version}`);
+              process.exit(1);
+            }
+          }
+          NODE
+
+      - name: Test
+        run: zig build test --fetch
+
+      - name: Integration smoke
+        run: zig build integration
+
+      - name: Build release packages
+        run: node scripts/build-dist.mjs
+
+      - name: Check package contents
+        run: |
+          npm pack --dry-run
+          for package_dir in npm/linux-x64 npm/linux-arm64 npm/darwin-arm64 npm/darwin-x64; do
+            npm pack --dry-run "$package_dir"
+          done
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for package_dir in npm/linux-x64 npm/linux-arm64 npm/darwin-arm64 npm/darwin-x64; do
+            npm publish "$package_dir" --access public --provenance
+          done
+
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish . --provenance
