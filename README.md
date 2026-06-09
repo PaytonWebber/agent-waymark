@@ -65,8 +65,8 @@ connected.
 
 This registers both halves, which is the whole point of the design:
 
-- The **MCP server** (`record`, `recall`, `timeline`, `supersede`, `done`,
-  `pin`) is how the model writes and explicitly queries state.
+- The **MCP server** (`record`, `recall`, `timeline`, `supersede`, `touch`,
+  `done`, `pin`) is how the model writes and explicitly queries state.
 - The **hooks** are how recall actually happens, since a tool-only server can't
   inject context on its own:
   - `SessionStart` injects the scope header (pinned entries, open todos, recent
@@ -168,10 +168,38 @@ agent-waymark recall "project state"
 If Ollama is not running, `record` and `recall` will report an embedding service
 error. Start Ollama and try again.
 
+### What belongs in waymark
+
+Waymark is for live working state, not permanent project documentation. Good
+entries are things a later session should not have to re-discover:
+
+- Decisions: "use a daemon to own the store."
+- Findings: "the Apple Silicon npm package resolves to darwin-arm64."
+- Rejected paths: "do not keep per-process stores; sub-agents corrupt state."
+- Todos: "wire the hosted backend auth check."
+
+Do not record every thought. Do not use it as a replacement for README files,
+architecture docs, issue trackers, or source comments. When an entry becomes a
+stable project fact, move it into the repo. When a todo is done, mark it done.
+When an old decision is still true, `touch` it instead of rewriting it.
+
+Entries show freshness in recall, timeline, and injected context. Freshness is
+based on the last confirmation if present, otherwise the last update. Entries
+older than two weeks are flagged `stale?`, which means "verify before relying on
+this." `record` also checks for near-duplicates. If a new entry looks very close
+to an existing active entry, it still records it but warns you to consider
+`supersede` or `touch`.
+
+File refs are checked too. If an entry records a file ref, waymark stores a hash
+of that file at write time. Later recall, timeline, and injected context flag
+the entry if the file changed or disappeared. This does not prove a decision is
+wrong; it tells the agent to verify it before trusting it.
+
 ### Scoping
 
-State is scoped to the **git repository** (the toplevel, so subdirectories and
-worktrees of one repo share it). Within a repo, scope is hierarchical:
+State is scoped to the **git repository**. Linked git worktrees share the same
+repo-wide scope, but file refs are resolved against the active worktree where
+the entry was recorded. Within a repo, scope is hierarchical:
 
 - **Repo-wide** (`repo:<root>`) is the default for writes and is visible from
   every branch. This is where durable decisions, findings, and rejected paths
@@ -195,11 +223,13 @@ repo-wide by default; add `--branch-local` for branch-specific entries. Pass
 
 ```bash
 agent-waymark record decision "use a daemon to own the store"
+agent-waymark record finding "auth middleware owns tenant lookup" --ref src/auth.ts:42
 agent-waymark record todo "wire up the new endpoint" --branch-local
 agent-waymark recall  "who owns the store?"
 agent-waymark timeline
 agent-waymark header                        # the always-on session summary
 agent-waymark done <id>                     # finish a todo (kept for history)
+agent-waymark touch <id>                    # confirm an entry is still valid
 agent-waymark pin <id>                      # always show an entry in the header
 agent-waymark unpin <id>
 ```
@@ -226,7 +256,6 @@ want it faster still, point `AGENT_WAYMARK_EMBED_MODEL` at a smaller model (e.g.
 `all-minilm`); the query and stored vectors must use the same model, so delete
 the store (or re-record) when you switch.
 
-Packaging for npm and the Claude plugin is in place; see [RELEASE.md](RELEASE.md).
 Still ahead: a cross-machine team backend (TCP + auth).
 
 ## License

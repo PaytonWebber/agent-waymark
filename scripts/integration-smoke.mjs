@@ -44,6 +44,34 @@ try {
   });
   assert(record.ok && record.id === 1, `record failed: ${JSON.stringify(record)}`);
 
+  const duplicate = await rpc(socketPath, {
+    op: "record",
+    kind: "finding",
+    scope,
+    body: "integration duplicate uses the same vector",
+    text: "integration duplicate uses the same vector",
+    author: "integration",
+    embedding: vec,
+  });
+  assert(duplicate.ok && duplicate.id === 2, `duplicate record failed: ${JSON.stringify(duplicate)}`);
+  assert(
+    duplicate.warning?.includes("similar to #1"),
+    `duplicate record did not warn about the existing entry: ${JSON.stringify(duplicate)}`,
+  );
+
+  const touch = await rpc(socketPath, { op: "touch", id: 1 });
+  assert(touch.ok, `touch failed: ${JSON.stringify(touch)}`);
+
+  for (let i = 0; i < 3; i += 1) {
+    const activity = await rpc(socketPath, { op: "activity" });
+    assert(activity.ok && !activity.text, `activity should stay quiet before threshold: ${JSON.stringify(activity)}`);
+  }
+  const activityNudge = await rpc(socketPath, { op: "activity" });
+  assert(
+    activityNudge.ok && activityNudge.text?.includes("4 user prompts"),
+    `activity did not nudge after four prompts: ${JSON.stringify(activityNudge)}`,
+  );
+
   const recall = await rpc(socketPath, {
     op: "recall",
     scope,
@@ -52,7 +80,12 @@ try {
     limit: 3,
   });
   assert(recall.ok, `recall failed: ${JSON.stringify(recall)}`);
-  assert(recall.hits?.[0]?.body === body, `recall did not return recorded body: ${JSON.stringify(recall)}`);
+  const recalledOriginal = recall.hits?.find((hit) => hit.body === body);
+  assert(recalledOriginal, `recall did not return recorded body: ${JSON.stringify(recall)}`);
+  assert(
+    recalledOriginal.freshness?.includes("confirmed"),
+    `recall did not show confirmation freshness: ${JSON.stringify(recall)}`,
+  );
 
   const mcpLines = await runMcp(exe, env);
   assert(mcpLines.length === 3, `expected 3 MCP responses, got ${mcpLines.length}: ${mcpLines.join("\n")}`);
@@ -62,7 +95,7 @@ try {
   assert(init.result?.serverInfo?.name === "agent-waymark", `bad MCP init: ${mcpLines[0]}`);
   assert(tools.result?.tools?.some((tool) => tool.name === "record"), `MCP tools/list missing record: ${mcpLines[1]}`);
   assert(
-    timeline.result?.content?.some((item) => item.text?.includes(body)),
+    timeline.result?.content?.some((item) => item.text?.includes(body) && item.text?.includes("confirmed")),
     `MCP timeline missing recorded body: ${mcpLines[2]}`,
   );
 

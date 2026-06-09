@@ -27,6 +27,9 @@ const Entry = entry_mod.Entry;
 const EntryKind = entry_mod.EntryKind;
 const Hit = entry_mod.Hit;
 const EntryJson = entry_mod.EntryJson;
+const RefState = entry_mod.RefState;
+const RefStateJson = entry_mod.RefStateJson;
+const RefStatus = entry_mod.RefStatus;
 const Snapshot = entry_mod.Snapshot;
 
 /// quantal index instantiation. `dim` matches the embedding model; 32 edges is
@@ -42,6 +45,7 @@ const max_pinned = 5;
 pub const NewEntry = struct {
     kind: EntryKind,
     scope: []const u8,
+    worktree_root: ?[]const u8 = null,
     body: []const u8,
     refs: []const []const u8 = &.{},
     author: []const u8 = "",
@@ -57,6 +61,8 @@ pub const Store = struct {
     index: Index,
     entries: std.AutoHashMapUnmanaged(u64, Entry) = .empty,
     next_id: u64 = 1,
+    prompts_since_write: usize = 0,
+    last_nudge_prompt_count: usize = 0,
 
     /// Open (or create) the store backed by the snapshot at `path`. `path` and
     /// `io` are borrowed and must outlive the store.
@@ -98,6 +104,7 @@ pub const Store = struct {
     /// unchanged.
     pub fn record(self: *Store, ne: NewEntry) !u64 {
         if (ne.embedding.len != embedder.dim) return error.EmbeddingDimMismatch;
+        const now = self.nowSeconds();
 
         // Supersede the head of the chain: if the named entry was itself already
         // replaced, replace its current version instead of forking history.
@@ -117,7 +124,7 @@ pub const Store = struct {
         }
 
         const id = self.next_id;
-        const e = try self.allocEntry(id, effective);
+        const e = try self.allocEntry(id, effective, now, null);
         errdefer self.freeEntry(e);
 
         try self.index.add(self.allocator, id, e.embedding);
@@ -129,21 +136,40 @@ pub const Store = struct {
         // Link the superseded entry only after the new one is committed to the
         // map, so a failure above leaves the old entry untouched.
         var relinked = false;
+        var old_updated_at: i64 = 0;
         if (supersede_head) |head| {
             if (self.entries.getPtr(head)) |old_ptr| {
                 old_ptr.superseded_by = id;
+                old_updated_at = old_ptr.updated_at;
+                old_ptr.updated_at = now;
                 relinked = true;
             }
         }
         errdefer if (relinked) {
-            if (self.entries.getPtr(supersede_head.?)) |old_ptr| old_ptr.superseded_by = null;
+            if (self.entries.getPtr(supersede_head.?)) |old_ptr| {
+                old_ptr.superseded_by = null;
+                old_ptr.updated_at = old_updated_at;
+            }
         };
 
         self.next_id += 1;
         errdefer self.next_id -= 1;
 
         try self.persist();
+        self.noteWrite();
         return id;
+    }
+
+    pub fn nearestDuplicate(
+        self: *Store,
+        arena: Allocator,
+        query: []const f32,
+        scope: []const u8,
+        threshold: f32,
+    ) !?Hit {
+        const hits = try self.recall(arena, query, scope, null, 1);
+        if (hits.len > 0 and hits[0].score >= threshold) return hits[0];
+        return null;
     }
 
     /// Mark an entry done (a finished todo). It stays in the store for the audit
@@ -152,9 +178,33 @@ pub const Store = struct {
     pub fn resolve(self: *Store, id: u64) !bool {
         const ptr = self.entries.getPtr(id) orelse return false;
         if (ptr.resolved) return true;
+        const old_updated_at = ptr.updated_at;
         ptr.resolved = true;
-        errdefer ptr.resolved = false;
+        ptr.updated_at = self.nowSeconds();
+        errdefer {
+            ptr.resolved = false;
+            ptr.updated_at = old_updated_at;
+        }
         try self.persist();
+        self.noteWrite();
+        return true;
+    }
+
+    /// Confirm that an entry is still valid without rewriting it. This is the
+    /// cheap "still current" action for old decisions and findings.
+    pub fn touch(self: *Store, id: u64) !bool {
+        const ptr = self.entries.getPtr(id) orelse return false;
+        const old_updated_at = ptr.updated_at;
+        const old_confirmed_at = ptr.confirmed_at;
+        const now = self.nowSeconds();
+        ptr.updated_at = now;
+        ptr.confirmed_at = now;
+        errdefer {
+            ptr.updated_at = old_updated_at;
+            ptr.confirmed_at = old_confirmed_at;
+        }
+        try self.persist();
+        self.noteWrite();
         return true;
     }
 
@@ -164,9 +214,15 @@ pub const Store = struct {
     pub fn setPinned(self: *Store, id: u64, pinned: bool) !bool {
         const ptr = self.entries.getPtr(id) orelse return false;
         if (ptr.pinned == pinned) return true;
+        const old_updated_at = ptr.updated_at;
         ptr.pinned = pinned;
-        errdefer ptr.pinned = !pinned;
+        ptr.updated_at = self.nowSeconds();
+        errdefer {
+            ptr.pinned = !pinned;
+            ptr.updated_at = old_updated_at;
+        }
         try self.persist();
+        self.noteWrite();
         return true;
     }
 
@@ -190,7 +246,21 @@ pub const Store = struct {
         if (!removed) return false;
         if (self.entries.fetchRemove(id)) |kv| self.freeEntry(kv.value);
         try self.persist();
+        self.noteWrite();
         return true;
+    }
+
+    pub fn promptActivity(self: *Store, arena: Allocator) !?[]const u8 {
+        self.prompts_since_write += 1;
+        if (self.prompts_since_write < 4) return null;
+        if (self.prompts_since_write < self.last_nudge_prompt_count + 4) return null;
+        self.last_nudge_prompt_count = self.prompts_since_write;
+        const nudge = try std.fmt.allocPrint(
+            arena,
+            "agent-waymark: {d} user prompts since the last state write. If this investigation produced a decision, finding, rejected path, or todo, record it.",
+            .{self.prompts_since_write},
+        );
+        return nudge;
     }
 
     /// Semantic search over active entries, optionally restricted to a scope
@@ -225,7 +295,7 @@ pub const Store = struct {
             if (!e.isActive()) continue;
             if (!scopeVisible(e.scope, scope)) continue;
             if (kind) |k| if (e.kind != k) continue;
-            try hits.append(arena, try hydrate(arena, sr.score, e));
+            try hits.append(arena, try self.hydrate(arena, sr.score, e));
             if (hits.items.len >= limit) break;
         }
         return hits.items;
@@ -254,21 +324,27 @@ pub const Store = struct {
         max_todos: usize,
         max_decisions: usize,
     ) ![]u8 {
+        const now = self.nowSeconds();
         const pinned = try self.collect(arena, scope, null, true, max_pinned);
+        const review = try self.collectNeedsReview(arena, scope, 5, now);
         // The kind sections exclude pinned entries, which appear above.
         const todo_total = self.countMatching(scope, .todo, false);
         const dec_total = self.countMatching(scope, .decision, false);
-        if (pinned.len == 0 and todo_total == 0 and dec_total == 0) return "";
+        if (pinned.len == 0 and review.len == 0 and todo_total == 0 and dec_total == 0) return "";
 
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;
         try w.print("## agent-waymark state: {s}\n", .{if (scope.len > 0) scope else "all scopes"});
         if (pinned.len > 0) {
             try w.writeAll("\nPinned:\n");
-            for (pinned) |h| try writeHeaderLine(w, h);
+            for (pinned) |h| try writeHeaderLine(arena, w, h, now);
         }
-        try self.writeSection(arena, w, scope, .todo, "Open todos", todo_total, max_todos);
-        try self.writeSection(arena, w, scope, .decision, "Recent decisions", dec_total, max_decisions);
+        if (review.len > 0) {
+            try w.writeAll("\nNeeds review:\n");
+            for (review) |h| try writeHeaderLine(arena, w, h, now);
+        }
+        try self.writeSection(arena, w, scope, .todo, "Open todos", todo_total, max_todos, now);
+        try self.writeSection(arena, w, scope, .decision, "Recent decisions", dec_total, max_decisions, now);
         return out.toOwnedSlice();
     }
 
@@ -281,11 +357,12 @@ pub const Store = struct {
         label: []const u8,
         total: usize,
         max: usize,
+        now: i64,
     ) !void {
         if (total == 0) return;
         const rows = try self.collect(arena, scope, kind, false, max);
         try w.print("\n{s} ({d}):\n", .{ label, total });
-        for (rows) |h| try writeHeaderLine(w, h);
+        for (rows) |h| try writeHeaderLine(arena, w, h, now);
         if (total > rows.len) try w.print("  …and {d} more (recall to see them)\n", .{total - rows.len});
     }
 
@@ -305,12 +382,12 @@ pub const Store = struct {
         while (it.next()) |kv| {
             if (matches(kv.value_ptr.*, scope, kind, want_pinned)) try ids.append(arena, kv.key_ptr.*);
         }
-        std.mem.sort(u64, ids.items, {}, std.sort.desc(u64));
+        std.mem.sort(u64, ids.items, self, newerEntry);
 
         const take = @min(ids.items.len, limit);
         var hits = try std.ArrayList(Hit).initCapacity(arena, take);
         for (ids.items[0..take]) |id| {
-            try hits.append(arena, try hydrate(arena, 0, self.entries.get(id).?));
+            try hits.append(arena, try self.hydrate(arena, 0, self.entries.get(id).?));
         }
         return hits.items;
     }
@@ -324,8 +401,34 @@ pub const Store = struct {
         return n;
     }
 
+    fn collectNeedsReview(self: *Store, arena: Allocator, scope: []const u8, limit: usize, now: i64) ![]Hit {
+        var ids = try std.ArrayList(u64).initCapacity(arena, self.entries.count());
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (!matches(e, scope, null, null)) continue;
+            if (e.pinned) continue;
+            if (entry_mod.isStale(e.created_at, e.updated_at, e.confirmed_at, now) or self.hasRefIssue(e)) {
+                try ids.append(arena, kv.key_ptr.*);
+            }
+        }
+        std.mem.sort(u64, ids.items, self, newerEntry);
+
+        const take = @min(ids.items.len, limit);
+        var hits = try std.ArrayList(Hit).initCapacity(arena, take);
+        for (ids.items[0..take]) |id| {
+            try hits.append(arena, try self.hydrate(arena, 0, self.entries.get(id).?));
+        }
+        return hits.items;
+    }
+
     pub fn nowSeconds(self: *Store) i64 {
         return std.Io.Timestamp.now(self.io, .real).toSeconds();
+    }
+
+    fn noteWrite(self: *Store) void {
+        self.prompts_since_write = 0;
+        self.last_nudge_prompt_count = 0;
     }
 
     // ---- internals --------------------------------------------------------
@@ -352,8 +455,10 @@ pub const Store = struct {
                 .supersedes = r.supersedes,
                 .embedding = r.embedding,
             };
-            var e = try self.allocEntry(r.id, ne);
-            e.ts = r.ts; // preserve the saved timestamp rather than re-stamping
+            var e = try self.allocEntry(r.id, ne, r.created_at, r.ref_states);
+            e.created_at = r.created_at;
+            e.updated_at = r.updated_at;
+            e.confirmed_at = r.confirmed_at;
             e.superseded_by = r.superseded_by;
             e.resolved = r.resolved;
             e.pinned = r.pinned;
@@ -376,11 +481,14 @@ pub const Store = struct {
             const e = kv.value_ptr.*;
             rows[i] = .{
                 .id = e.id,
-                .ts = e.ts,
+                .created_at = e.created_at,
+                .updated_at = e.updated_at,
+                .confirmed_at = e.confirmed_at,
                 .kind = e.kind.toString(),
                 .scope = e.scope,
                 .body = e.body,
                 .refs = castRefs(e.refs),
+                .ref_states = try jsonRefStates(a, e.ref_states),
                 .author = e.author,
                 .supersedes = e.supersedes,
                 .superseded_by = e.superseded_by,
@@ -397,7 +505,7 @@ pub const Store = struct {
         try cwd.rename(self.tmp_path, cwd, self.path, self.io);
     }
 
-    fn allocEntry(self: *Store, id: u64, ne: NewEntry) !Entry {
+    fn allocEntry(self: *Store, id: u64, ne: NewEntry, now: i64, stored_ref_states: ?[]const RefStateJson) !Entry {
         const a = self.allocator;
         const scope_copy = try a.dupe(u8, ne.scope);
         errdefer a.free(scope_copy);
@@ -419,13 +527,22 @@ pub const Store = struct {
             filled += 1;
         }
 
+        const ref_states = if (stored_ref_states) |states|
+            try self.dupeRefStates(states)
+        else
+            try self.captureRefStates(ne.scope, ne.worktree_root, ne.refs);
+        errdefer self.freeRefStates(ref_states);
+
         return .{
             .id = id,
-            .ts = self.nowSeconds(),
+            .created_at = now,
+            .updated_at = now,
+            .confirmed_at = null,
             .kind = ne.kind,
             .scope = scope_copy,
             .body = body_copy,
             .refs = refs_copy,
+            .ref_states = ref_states,
             .author = author_copy,
             .supersedes = ne.supersedes,
             .superseded_by = null,
@@ -443,11 +560,140 @@ pub const Store = struct {
         a.free(e.embedding);
         for (e.refs) |r| a.free(r);
         a.free(e.refs);
+        self.freeRefStates(e.ref_states);
+    }
+
+    fn captureRefStates(self: *Store, scope: []const u8, worktree_root: ?[]const u8, refs: []const []const u8) ![]RefState {
+        var states: std.ArrayList(RefState) = .empty;
+        errdefer {
+            for (states.items) |state| {
+                self.allocator.free(state.ref);
+                self.allocator.free(state.path);
+            }
+            states.deinit(self.allocator);
+        }
+        for (refs) |ref| {
+            if (try self.captureRefState(scope, worktree_root, ref)) |state| {
+                try states.append(self.allocator, state);
+            }
+        }
+        return states.toOwnedSlice(self.allocator);
+    }
+
+    fn captureRefState(self: *Store, scope: []const u8, worktree_root: ?[]const u8, ref: []const u8) !?RefState {
+        const path = try refToPath(self.allocator, scope, worktree_root, ref) orelse return null;
+        errdefer self.allocator.free(path);
+        const hash = self.hashPath(path) orelse {
+            self.allocator.free(path);
+            return null;
+        };
+        const ref_copy = try self.allocator.dupe(u8, ref);
+        return .{ .ref = ref_copy, .path = path, .hash = hash };
+    }
+
+    fn dupeRefStates(self: *Store, states: []const RefStateJson) ![]RefState {
+        const out = try self.allocator.alloc(RefState, states.len);
+        var filled: usize = 0;
+        errdefer {
+            for (out[0..filled]) |state| {
+                self.allocator.free(state.ref);
+                self.allocator.free(state.path);
+            }
+            self.allocator.free(out);
+        }
+        for (states, out) |src, *dst| {
+            const ref = try self.allocator.dupe(u8, src.ref);
+            errdefer self.allocator.free(ref);
+            const path = try self.allocator.dupe(u8, src.path);
+            dst.* = .{
+                .ref = ref,
+                .path = path,
+                .hash = src.hash,
+            };
+            filled += 1;
+        }
+        return out;
+    }
+
+    fn freeRefStates(self: *Store, states: []RefState) void {
+        for (states) |state| {
+            self.allocator.free(state.ref);
+            self.allocator.free(state.path);
+        }
+        self.allocator.free(states);
+    }
+
+    fn hashPath(self: *Store, path: []const u8) ?u64 {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(8 * 1024 * 1024)) catch return null;
+        defer self.allocator.free(bytes);
+        return std.hash.Wyhash.hash(0, bytes);
+    }
+
+    fn refStatuses(self: *Store, arena: Allocator, states: []const RefState) ![]RefStatus {
+        var statuses: std.ArrayList(RefStatus) = .empty;
+        for (states) |state| {
+            const current = self.hashPath(state.path);
+            const status: ?[]const u8 = if (current) |hash|
+                if (hash == state.hash) null else "changed"
+            else
+                "missing";
+            if (status) |s| {
+                try statuses.append(arena, .{
+                    .ref = try arena.dupe(u8, state.ref),
+                    .status = s,
+                });
+            }
+        }
+        return statuses.toOwnedSlice(arena);
+    }
+
+    fn hasRefIssue(self: *Store, e: Entry) bool {
+        for (e.ref_states) |state| {
+            const current = self.hashPath(state.path) orelse return true;
+            if (current != state.hash) return true;
+        }
+        return false;
+    }
+
+    fn hydrate(self: *Store, arena: Allocator, score: f32, e: Entry) !Hit {
+        const refs = try arena.alloc([]const u8, e.refs.len);
+        for (e.refs, refs) |src, *dst| dst.* = try arena.dupe(u8, src);
+        return .{
+            .id = e.id,
+            .score = score,
+            .kind = e.kind,
+            .scope = try arena.dupe(u8, e.scope),
+            .body = try arena.dupe(u8, e.body),
+            .refs = refs,
+            .ref_statuses = try self.refStatuses(arena, e.ref_states),
+            .author = try arena.dupe(u8, e.author),
+            .supersedes = e.supersedes,
+            .created_at = e.created_at,
+            .updated_at = e.updated_at,
+            .confirmed_at = e.confirmed_at,
+        };
     }
 };
 
 fn castRefs(refs: [][]u8) []const []const u8 {
     return @ptrCast(refs);
+}
+
+fn jsonRefStates(a: Allocator, states: []const RefState) ![]const RefStateJson {
+    const out = try a.alloc(RefStateJson, states.len);
+    for (states, out) |src, *dst| {
+        dst.* = .{ .ref = src.ref, .path = src.path, .hash = src.hash };
+    }
+    return out;
+}
+
+fn newerEntry(store: *Store, lhs: u64, rhs: u64) bool {
+    const l = store.entries.get(lhs).?;
+    const r = store.entries.get(rhs).?;
+    const lt = entry_mod.freshnessTime(l.created_at, l.updated_at, l.confirmed_at);
+    const rt = entry_mod.freshnessTime(r.created_at, r.updated_at, r.confirmed_at);
+    if (lt == rt) return lhs > rhs;
+    return lt > rt;
 }
 
 /// Whether an entry is active and matches the optional scope/kind/pin filters.
@@ -475,11 +721,69 @@ pub fn scopeVisible(entry_scope: []const u8, query: []const u8) bool {
         query[entry_scope.len] == '/';
 }
 
-fn writeHeaderLine(w: *std.Io.Writer, h: Hit) !void {
+fn refToPath(a: Allocator, scope: []const u8, worktree_root: ?[]const u8, ref: []const u8) !?[]u8 {
+    const candidate = refPathCandidate(ref) orelse return null;
+    if (std.fs.path.isAbsolute(candidate)) return try a.dupe(u8, candidate);
+    if (worktree_root) |root| {
+        if (root.len > 0) return try std.fs.path.join(a, &.{ root, candidate });
+    }
+    if (repoRoot(scope)) |root| {
+        if (root.len > 0) return try std.fs.path.join(a, &.{ root, candidate });
+    }
+    return try a.dupe(u8, candidate);
+}
+
+fn repoRoot(scope: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, scope, "repo:")) return null;
+    const rest = scope["repo:".len..];
+    if (std.mem.indexOf(u8, rest, "/branch/")) |idx| return rest[0..idx];
+    return rest;
+}
+
+fn refPathCandidate(ref: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, ref, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    if (std.mem.startsWith(u8, trimmed, "entry:")) return null;
+    if (std.mem.indexOf(u8, trimmed, "://") != null) return null;
+
+    var end = trimmed.len;
+    for (trimmed, 0..) |c, i| {
+        if (std.ascii.isWhitespace(c)) {
+            end = i;
+            break;
+        }
+    }
+    if (std.mem.indexOfScalar(u8, trimmed[0..end], '#')) |idx| end = idx;
+    if (std.mem.lastIndexOfScalar(u8, trimmed[0..end], ':')) |idx| {
+        if (idx + 1 < end and allDigits(trimmed[idx + 1 .. end])) end = idx;
+    }
+
+    const candidate = std.mem.trim(u8, trimmed[0..end], " \t\r\n");
+    if (candidate.len == 0) return null;
+    return candidate;
+}
+
+fn allDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+fn writeHeaderLine(a: Allocator, w: *std.Io.Writer, h: Hit, now: i64) !void {
     const clipped = clip(h.body, 200);
-    try w.print("- #{d} {s}", .{ h.id, clipped });
+    const freshness = try entry_mod.formatFreshness(a, h.created_at, h.updated_at, h.confirmed_at, now);
+    try w.print("- #{d} [{s}] {s}", .{ h.id, freshness, clipped });
     if (clipped.len < h.body.len) try w.writeAll("…");
     if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
+    if (h.ref_statuses.len > 0) {
+        try w.writeAll(" [refs ");
+        for (h.ref_statuses[0..@min(h.ref_statuses.len, 2)], 0..) |status, i| {
+            if (i != 0) try w.writeAll(", ");
+            try w.print("{s}: {s}", .{ status.status, status.ref });
+        }
+        if (h.ref_statuses.len > 2) try w.print(", +{d}", .{h.ref_statuses.len - 2});
+        try w.writeByte(']');
+    }
     // Flag branch-local entries so it's clear which are scoped to this branch
     // rather than repo-wide.
     if (std.mem.indexOf(u8, h.scope, "/branch/") != null) try w.writeAll(" [branch]");
@@ -493,20 +797,4 @@ fn clip(s: []const u8, max: usize) []const u8 {
     if (std.mem.indexOfScalar(u8, s[0..end], '\n')) |nl| end = nl;
     while (end > 0 and s[end - 1] & 0xC0 == 0x80) end -= 1; // back off into a continuation byte
     return s[0..end];
-}
-
-fn hydrate(arena: Allocator, score: f32, e: Entry) !Hit {
-    const refs = try arena.alloc([]const u8, e.refs.len);
-    for (e.refs, refs) |src, *dst| dst.* = try arena.dupe(u8, src);
-    return .{
-        .id = e.id,
-        .score = score,
-        .kind = e.kind,
-        .scope = try arena.dupe(u8, e.scope),
-        .body = try arena.dupe(u8, e.body),
-        .refs = refs,
-        .author = try arena.dupe(u8, e.author),
-        .supersedes = e.supersedes,
-        .ts = e.ts,
-    };
 }

@@ -7,10 +7,11 @@
 //!
 //!   agent-waymark daemon
 //!   agent-waymark ping
-//!   agent-waymark record <kind> <body> [--scope S] [--author A] [--supersedes N]
+//!   agent-waymark record <kind> <body> [--scope S] [--author A] [--supersedes N] [--ref PATH]
 //!   agent-waymark recall <query>        [--scope S] [--kind K] [--limit N]
 //!   agent-waymark timeline              [--scope S] [--kind K] [--limit N]
 //!   agent-waymark header                [--scope S] [--limit N]
+//!   agent-waymark touch <id>
 //!   agent-waymark forget <id>
 
 const std = @import("std");
@@ -85,22 +86,25 @@ pub fn main(init: std.process.Init) !void {
         return doctor.run(allocator, io, env, cfg, args);
     }
 
-    var req = buildRequest(cmd, args) catch |err| {
-        fatal("{s}", .{@errorName(err)});
-    };
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
+
+    var req = buildRequest(a, cmd, args) catch |err| {
+        fatal("{s}", .{@errorName(err)});
+    };
 
     // Default the scope the same way the bridge and hooks do. `record` writes
     // repo-wide by default (durable knowledge), or branch-local with
     // `--branch-local`; everything else queries at the branch scope (reads see
     // repo-wide + current branch). Pass an explicit `--scope ""` to span all.
-    if (req.scope == null) {
+    if (req.scope == null or std.mem.eql(u8, req.op, "record")) {
         const info = scope_mod.detect(a, io, env, null);
-        const repo_wide_write = std.mem.eql(u8, cmd, "record") and !flagPresent(args, "--branch-local");
-        req.scope = if (repo_wide_write) info.repo_scope else info.branch_scope;
+        if (req.scope == null) {
+            const repo_wide_write = std.mem.eql(u8, cmd, "record") and !flagPresent(args, "--branch-local");
+            req.scope = if (repo_wide_write) info.repo_scope else info.branch_scope;
+        }
+        req.worktree_root = info.worktree_root;
     }
 
     var client: Client = undefined;
@@ -128,18 +132,20 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
         .client = &client,
         .repo_scope = info.repo_scope,
         .branch_scope = info.branch_scope,
+        .worktree_root = info.worktree_root,
         .author = env.get("AGENT_WAYMARK_AUTHOR") orelse "claude-code",
     };
     var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
-        .server_info = .{ .name = "agent-waymark", .version = "0.1.1" },
+        .server_info = .{ .name = "agent-waymark", .version = "0.1.2" },
         .capabilities = .{ .tools = .{} },
         .instructions =
         \\Shared working-state for this project, so work carries across
         \\sessions and sub-agents. Be proactive about writing to it:
         \\  - When you make an architectural decision, hit a dead end, learn
         \\    a non-obvious fact, or take on a task, record it (record /
-        \\    supersede / done). Capture decisions and dead ends, not every
-        \\    thought.
+        \\    supersede / touch / done). Capture decisions and dead ends, not
+        \\    every thought.
+        \\  - If an old entry is still true, touch it instead of rewriting it.
         \\  - Before investigating something non-trivial, recall first to see
         \\    if it was already decided or tried.
         \\Relevant prior entries are injected automatically at session start
@@ -149,7 +155,7 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
     try server.start(io);
 }
 
-fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {
+fn buildRequest(a: std.mem.Allocator, cmd: []const u8, args: []const []const u8) !Request {
     if (std.mem.eql(u8, cmd, "ping")) return .{ .op = "ping" };
 
     if (std.mem.eql(u8, cmd, "record")) {
@@ -162,6 +168,7 @@ fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {
             .scope = flag(args, "--scope"),
             .author = flag(args, "--author"),
             .supersedes = try optU64(flag(args, "--supersedes")),
+            .refs = try refs(a, args),
         };
     }
 
@@ -198,6 +205,11 @@ fn buildRequest(cmd: []const u8, args: []const []const u8) !Request {
         return .{ .op = "done", .id = try std.fmt.parseInt(u64, args[0], 10) };
     }
 
+    if (std.mem.eql(u8, cmd, "touch") or std.mem.eql(u8, cmd, "confirm")) {
+        if (args.len < 1) return error.TouchNeedsId;
+        return .{ .op = "touch", .id = try std.fmt.parseInt(u64, args[0], 10) };
+    }
+
     if (std.mem.eql(u8, cmd, "pin") or std.mem.eql(u8, cmd, "unpin")) {
         if (args.len < 1) return error.PinNeedsId;
         return .{ .op = cmd, .id = try std.fmt.parseInt(u64, args[0], 10) };
@@ -226,6 +238,30 @@ fn flagPresent(args: []const []const u8, name: []const u8) bool {
     return false;
 }
 
+fn refs(a: std.mem.Allocator, args: []const []const u8) !?[]const []const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--ref")) {
+            if (i + 1 >= args.len) return error.RefNeedsPath;
+            n += 1;
+            i += 1;
+        }
+    }
+    if (n == 0) return null;
+    const out = try a.alloc([]const u8, n);
+    var j: usize = 0;
+    i = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--ref")) {
+            out[j] = args[i + 1];
+            j += 1;
+            i += 1;
+        }
+    }
+    return out;
+}
+
 fn optU64(s: ?[]const u8) !?u64 {
     return if (s) |v| try std.fmt.parseInt(u64, v, 10) else null;
 }
@@ -248,13 +284,18 @@ fn printResponse(io: std.Io, resp: protocol.Response) !void {
     if (resp.text) |t| {
         if (t.len > 0) try w.print("{s}\n", .{t}) else try w.writeAll("(empty)\n");
     }
+    if (resp.warning) |warning| try w.print("warning: {s}\n", .{warning});
     if (resp.hits) |hits| {
         if (hits.len == 0) try w.writeAll("(no matches)\n");
         for (hits) |h| {
-            try w.print("#{d} [{s}]", .{ h.id, h.kind });
+            try w.print("#{d} [{s}] ({s})", .{ h.id, h.kind, h.freshness });
             if (h.score != 0) try w.print(" {d:.3}", .{h.score});
             if (h.scope.len > 0) try w.print(" {s}", .{h.scope});
             if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
+            if (h.ref_statuses.len > 0) {
+                try w.writeAll(" refs:");
+                for (h.ref_statuses) |status| try w.print(" {s} {s}", .{ status.status, status.ref });
+            }
             try w.print("\n  {s}\n", .{h.body});
         }
     }
@@ -276,11 +317,12 @@ fn usage() void {
         \\  agent-waymark hook <Event>          run a hook (reads the event JSON on stdin)
         \\
         \\  agent-waymark ping
-        \\  agent-waymark record <kind> <body> [--scope S] [--author A] [--supersedes N]
+        \\  agent-waymark record <kind> <body> [--scope S] [--author A] [--supersedes N] [--ref PATH]
         \\  agent-waymark recall <query>        [--scope S] [--kind K] [--limit N]
         \\  agent-waymark timeline              [--scope S] [--kind K] [--limit N]
         \\  agent-waymark header                [--scope S] [--limit N]
         \\  agent-waymark done <id>             mark a todo done (kept for history)
+        \\  agent-waymark touch <id>            confirm an entry is still valid
         \\  agent-waymark pin <id> | unpin <id> always show an entry in the header
         \\  agent-waymark forget <id>
         \\

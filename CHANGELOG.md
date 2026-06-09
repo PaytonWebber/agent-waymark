@@ -1,30 +1,50 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.2 (2026-06-09)
 
-First release.
+### Added
 
-- Durable shared working-state for agent orchestration: structured entries
-  (decision / finding / rejected / todo / artifact / note) over a quantal vector
-  index, owned by a single unix-socket daemon; thin MCP, hook, and CLI clients.
-- MCP server (`record`, `recall`, `timeline`, `supersede`, `done`, `pin`).
-- Claude Code hook kit: `SessionStart` and `SubagentStart` inject the scope
-  header; `UserPromptSubmit` injects prompt-relevant recall (gated on a cosine
-  relevance floor so off-topic prompts add nothing); `PreCompact` extracts
-  decisions/findings/todos from the transcript with a local chat model and
-  records the new ones (deduped), so state survives without manual recording.
-- The MCP server instructions and SessionStart nudge prompt the agent to record
-  as it works; the embedder is kept warm (`keep_alive`) to avoid cold-load
-  latency on the per-prompt hook.
-- `agent-waymark install` merges the MCP server + hooks into Claude Code config
-  (project or `--user`), preserving existing config and idempotent on re-run.
-- Entry lifecycle: `done`/resolve, supersede chain-head resolution with ref
-  inheritance, and pin/unpin so foundational entries stay in the header.
-- Concurrency: the daemon serves from a worker pool under an RwLock, so a
-  long-lived client never blocks transient ones.
-- L2-normalized embeddings (cosine scores).
-- Packaging: npm (per-platform binary via optional dependencies) and a
-  Claude Code plugin (bundled binaries). Linux x64/arm64, macOS arm64/x64.
+- `touch` / `confirm` for marking an existing entry as still valid without
+  rewriting it.
+- Freshness metadata on entries: `created_at`, `updated_at`, and `confirmed_at`.
+- Stale-entry signals for entries that have not been updated or confirmed for
+  two weeks.
+- Near-duplicate warnings on `record`, with suggestions to `supersede` or
+  `touch` the existing entry.
+- File-ref tracking with `record --ref PATH[:line]`. Waymark stores a file hash
+  and later flags entries whose referenced files changed or disappeared.
+- Linked worktree support. Worktrees share repo-wide state while file refs
+  resolve against the active worktree.
+- Prompt-activity nudges when several user prompts pass without any state write.
 
-Requires Zig 0.16 to build from source, and a local Ollama embedding model at
-runtime.
+### Changed
+
+- Header entries are ranked by latest update or confirmation instead of creation
+  order alone.
+- Automatic recall and MCP/CLI output include freshness and ref-status signals.
+
+## 0.1.1 (2026-06-08)
+
+### Added
+
+- `agent-waymark --doctor` alias.
+- `--help` / `-h` usage output.
+
+### Fixed
+
+- macOS Unix socket startup for the native client.
+
+## 0.1.0 (2026-06-08)
+
+### Added
+
+- Durable shared working-state daemon for structured entries:
+  `decision`, `finding`, `rejected`, `todo`, `artifact`, and `note`.
+- MCP tools: `record`, `recall`, `timeline`, `supersede`, `done`, and `pin`.
+- Claude Code hook kit for `SessionStart`, `SubagentStart`,
+  `UserPromptSubmit`, and `PreCompact`.
+- Project and user-level installers for Claude Code and Codex.
+- Supersede chains, resolved todos, pinned entries, hierarchical scopes, and
+  branch-local entries.
+- npm packaging with per-platform optional native binary packages.
+- Claude Code plugin packaging with bundled native binaries.

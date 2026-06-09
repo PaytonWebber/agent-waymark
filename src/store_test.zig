@@ -237,6 +237,132 @@ test "pinned entry stays in the header regardless of recency" {
     }
 }
 
+test "touch confirms an existing entry without rewriting it" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const id = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "still valid", .embedding = try axisVec(a, 0) });
+    try testing.expect(try store.touch(id));
+    try testing.expect(!try store.touch(9999));
+
+    const hits = try store.timeline(a, "repo:x", .decision, 10);
+    try testing.expectEqual(@as(usize, 1), hits.len);
+    try testing.expectEqual(id, hits[0].id);
+    try testing.expect(hits[0].confirmed_at != null);
+    try testing.expect(hits[0].updated_at >= hits[0].created_at);
+
+    const header = try store.header(a, "repo:x", 5, 5);
+    try testing.expect(std.mem.indexOf(u8, header, "confirmed") != null);
+}
+
+test "nearestDuplicate finds a similar active entry" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const first = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "same vector", .embedding = try axisVec(a, 0) });
+    const duplicate = try store.nearestDuplicate(a, try axisVec(a, 0), "repo:x", 0.92);
+    try testing.expect(duplicate != null);
+    try testing.expectEqual(first, duplicate.?.id);
+
+    const unrelated = try store.nearestDuplicate(a, try axisVec(a, 1), "repo:x", 0.92);
+    try testing.expect(unrelated == null);
+}
+
+test "prompt activity nudges after several prompts and resets on write" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testing.expect((try store.promptActivity(a)) == null);
+    try testing.expect((try store.promptActivity(a)) == null);
+    try testing.expect((try store.promptActivity(a)) == null);
+    const nudge = try store.promptActivity(a);
+    try testing.expect(nudge != null);
+    try testing.expect(std.mem.indexOf(u8, nudge.?, "4 user prompts") != null);
+    try testing.expect((try store.promptActivity(a)) == null);
+
+    _ = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "reset counter", .embedding = try axisVec(a, 0) });
+    try testing.expect((try store.promptActivity(a)) == null);
+    try testing.expect((try store.promptActivity(a)) == null);
+    try testing.expect((try store.promptActivity(a)) == null);
+    try testing.expect((try store.promptActivity(a)) != null);
+}
+
+test "file refs are flagged when the referenced file changes" {
+    const io = testIo();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(io, tmp.dir);
+    defer cwd.restore();
+
+    cleanup(io);
+    defer cleanup(io);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "tracked.txt", .data = "one\n" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.process.currentPathAlloc(io, a);
+    const scope = try std.fmt.allocPrint(a, "repo:{s}", .{root});
+    const refs = [_][]const u8{"tracked.txt:1"};
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    _ = try store.record(.{
+        .kind = .finding,
+        .scope = scope,
+        .worktree_root = root,
+        .body = "tracked file says one",
+        .refs = &refs,
+        .embedding = try axisVec(a, 0),
+    });
+
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 1), hits.len);
+        try testing.expectEqual(@as(usize, 0), hits[0].ref_statuses.len);
+    }
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "tracked.txt", .data = "two\n" });
+
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 1), hits.len);
+        try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
+        try testing.expectEqualStrings("changed", hits[0].ref_statuses[0].status);
+        try testing.expectEqualStrings("tracked.txt:1", hits[0].ref_statuses[0].ref);
+    }
+
+    const header = try store.header(a, scope, 5, 5);
+    try testing.expect(std.mem.indexOf(u8, header, "refs changed: tracked.txt:1") != null);
+}
+
 test "scopeVisible is hierarchical (repo-wide inherited, branch isolated)" {
     const v = store_mod.scopeVisible;
     const repo = "repo:/p";
@@ -342,3 +468,21 @@ test "persistence survives reopen" {
     const new_id = try store.record(.{ .kind = .note, .scope = "repo:x", .body = "post-reload", .embedding = try axisVec(a, 5) });
     try testing.expect(new_id > first_id);
 }
+
+const TempCwd = struct {
+    io: std.Io,
+    old_path: [:0]u8,
+
+    fn enter(io: std.Io, dir: std.Io.Dir) !TempCwd {
+        const old_path = try std.process.currentPathAlloc(io, std.testing.allocator);
+        errdefer std.testing.allocator.free(old_path);
+        try std.process.setCurrentDir(io, dir);
+        return .{ .io = io, .old_path = old_path };
+    }
+
+    fn restore(self: *TempCwd) void {
+        std.process.setCurrentPath(self.io, self.old_path) catch {};
+        std.testing.allocator.free(self.old_path);
+        self.* = undefined;
+    }
+};

@@ -8,8 +8,9 @@
 //! only on its branch. Writes default to repo-wide; branch-local is opt-in.
 //!
 //! The root is the git toplevel (so subdirectories and worktrees of one repo
-//! share state). The repo's default branch and non-git directories collapse to
-//! repo-wide. An explicit AGENT_WAYMARK_SCOPE overrides everything.
+//! share state through the repo's common git dir). File refs still use the
+//! active worktree root. The repo's default branch and non-git directories
+//! collapse to repo-wide. An explicit AGENT_WAYMARK_SCOPE overrides everything.
 //!
 //! Detection reads `.git` directly rather than spawning git, to keep the
 //! per-prompt hook fast.
@@ -22,29 +23,33 @@ pub const Info = struct {
     repo_scope: []const u8,
     /// Most-specific scope: used for reads, and for branch-local writes.
     branch_scope: []const u8,
+    /// Actual working tree root used to resolve file refs. In a linked worktree,
+    /// this is the linked worktree path, not the main repo path used for scope.
+    worktree_root: []const u8,
 };
 
 pub fn detect(a: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, cwd_override: ?[]const u8) Info {
-    if (env.get("AGENT_WAYMARK_SCOPE")) |s| return .{ .repo_scope = s, .branch_scope = s };
-
     const cwd = cwd_override orelse (std.process.currentPathAlloc(io, a) catch return flat(""));
-    const root = findGitRoot(a, io, cwd) orelse
+    if (env.get("AGENT_WAYMARK_SCOPE")) |s| return .{ .repo_scope = s, .branch_scope = s, .worktree_root = cwd };
+
+    const worktree_root = findGitRoot(a, io, cwd) orelse
         return flat(std.fmt.allocPrint(a, "repo:{s}", .{cwd}) catch "");
 
-    const repo_scope = std.fmt.allocPrint(a, "repo:{s}", .{root}) catch return flat("");
-    const paths = gitPaths(a, io, root);
+    const paths = gitPaths(a, io, worktree_root);
+    const repo_root = sharedRepoRoot(paths.common_dir) orelse worktree_root;
+    const repo_scope = std.fmt.allocPrint(a, "repo:{s}", .{repo_root}) catch return flat("");
 
     if (readBranch(a, io, paths.head_path)) |branch| {
         if (!isDefaultBranch(a, io, paths.common_dir, branch)) {
             const bs = std.fmt.allocPrint(a, "{s}/branch/{s}", .{ repo_scope, branch }) catch repo_scope;
-            return .{ .repo_scope = repo_scope, .branch_scope = bs };
+            return .{ .repo_scope = repo_scope, .branch_scope = bs, .worktree_root = worktree_root };
         }
     }
-    return .{ .repo_scope = repo_scope, .branch_scope = repo_scope };
+    return .{ .repo_scope = repo_scope, .branch_scope = repo_scope, .worktree_root = worktree_root };
 }
 
 fn flat(s: []const u8) Info {
-    return .{ .repo_scope = s, .branch_scope = s };
+    return .{ .repo_scope = s, .branch_scope = s, .worktree_root = if (std.mem.startsWith(u8, s, "repo:")) s["repo:".len..] else s };
 }
 
 /// True if `branch` is the repo's default branch. Prefers the actual default
@@ -82,15 +87,22 @@ fn gitPaths(a: std.mem.Allocator, io: std.Io, root: []const u8) GitPaths {
     const line = std.mem.trim(u8, gf, " \t\r\n");
     if (!std.mem.startsWith(u8, line, "gitdir:")) return fallback;
     const gd_raw = std.mem.trim(u8, line["gitdir:".len..], " \t\r\n");
-    const gitdir = if (std.fs.path.isAbsolute(gd_raw)) gd_raw else std.fs.path.join(a, &.{ root, gd_raw }) catch return fallback;
+    const gitdir = if (std.fs.path.isAbsolute(gd_raw)) gd_raw else std.fs.path.resolve(a, &.{ root, gd_raw }) catch return fallback;
 
     var common_dir = gitdir;
     if (cwd.readFileAlloc(io, std.fs.path.join(a, &.{ gitdir, "commondir" }) catch "", a, .limited(4096))) |cd| {
         const cdt = std.mem.trim(u8, cd, " \t\r\n");
-        common_dir = if (std.fs.path.isAbsolute(cdt)) cdt else std.fs.path.join(a, &.{ gitdir, cdt }) catch gitdir;
+        common_dir = if (std.fs.path.isAbsolute(cdt)) cdt else std.fs.path.resolve(a, &.{ gitdir, cdt }) catch gitdir;
     } else |_| {}
 
     return .{ .head_path = std.fs.path.join(a, &.{ gitdir, "HEAD" }) catch dir_head, .common_dir = common_dir };
+}
+
+fn sharedRepoRoot(common_dir: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, std.fs.path.basename(common_dir), ".git")) {
+        return std.fs.path.dirname(common_dir);
+    }
+    return null;
 }
 
 /// Walk up from `start` to the directory containing `.git` (a dir for a normal
@@ -118,3 +130,55 @@ fn symref(content: []const u8, comptime prefix: []const u8) ?[]const u8 {
     const line = std.mem.trim(u8, content, " \t\r\n");
     return if (std.mem.startsWith(u8, line, prefix)) line[prefix.len..] else null;
 }
+
+test "linked worktrees share repo scope but keep their own worktree root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    const io = std.testing.io;
+    const dir = std.Io.Dir.cwd();
+    try dir.createDirPath(io, "main/.git/refs/remotes/origin");
+    try dir.createDirPath(io, "main/.git/worktrees/linked");
+    try dir.createDirPath(io, "linked");
+    try dir.writeFile(io, .{ .sub_path = "main/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/refs/remotes/origin/HEAD", .data = "ref: refs/remotes/origin/main\n" });
+    try dir.writeFile(io, .{ .sub_path = "linked/.git", .data = "gitdir: ../main/.git/worktrees/linked\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/linked/HEAD", .data = "ref: refs/heads/feature\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/linked/commondir", .data = "../..\n" });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    const root = try std.process.currentPathAlloc(io, a);
+    const main = try std.fs.path.join(a, &.{ root, "main" });
+    const linked = try std.fs.path.join(a, &.{ root, "linked" });
+
+    const info = detect(a, io, &env, linked);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "repo:{s}", .{main}), info.repo_scope);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "repo:{s}/branch/feature", .{main}), info.branch_scope);
+    try std.testing.expectEqualStrings(linked, info.worktree_root);
+}
+
+const TempCwd = struct {
+    io: std.Io,
+    old_path: [:0]u8,
+
+    fn enter(io: std.Io, dir: std.Io.Dir) !TempCwd {
+        const old_path = try std.process.currentPathAlloc(io, std.testing.allocator);
+        errdefer std.testing.allocator.free(old_path);
+        try std.process.setCurrentDir(io, dir);
+        return .{ .io = io, .old_path = old_path };
+    }
+
+    fn restore(self: *TempCwd) void {
+        std.process.setCurrentPath(self.io, self.old_path) catch {};
+        std.testing.allocator.free(self.old_path);
+        self.* = undefined;
+    }
+};

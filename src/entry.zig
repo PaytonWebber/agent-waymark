@@ -30,11 +30,14 @@ pub const EntryKind = enum {
 /// so they outlive any single request.
 pub const Entry = struct {
     id: u64,
-    ts: i64,
+    created_at: i64,
+    updated_at: i64,
+    confirmed_at: ?i64,
     kind: EntryKind,
     scope: []u8,
     body: []u8,
     refs: [][]u8,
+    ref_states: []RefState,
     author: []u8,
     supersedes: ?u64,
     superseded_by: ?u64,
@@ -58,20 +61,43 @@ pub const Hit = struct {
     scope: []const u8,
     body: []const u8,
     refs: []const []const u8,
+    ref_statuses: []const RefStatus,
     author: []const u8,
     supersedes: ?u64,
-    ts: i64,
+    created_at: i64,
+    updated_at: i64,
+    confirmed_at: ?i64,
+};
+
+pub const RefState = struct {
+    ref: []u8,
+    path: []u8,
+    hash: u64,
+};
+
+pub const RefStateJson = struct {
+    ref: []const u8,
+    path: []const u8,
+    hash: u64,
+};
+
+pub const RefStatus = struct {
+    ref: []const u8,
+    status: []const u8,
 };
 
 /// On-disk / on-wire form. `kind` is serialized as its tag name so the snapshot
 /// stays readable and stable across enum reordering.
 pub const EntryJson = struct {
     id: u64,
-    ts: i64,
+    created_at: i64,
+    updated_at: i64,
+    confirmed_at: ?i64 = null,
     kind: []const u8,
     scope: []const u8,
     body: []const u8,
     refs: []const []const u8,
+    ref_states: []const RefStateJson = &.{},
     author: []const u8,
     supersedes: ?u64 = null,
     superseded_by: ?u64 = null,
@@ -84,3 +110,43 @@ pub const Snapshot = struct {
     next_id: u64,
     entries: []const EntryJson,
 };
+
+pub const stale_after_seconds: i64 = 14 * 24 * 60 * 60;
+
+pub fn freshnessTime(created_at: i64, updated_at: i64, confirmed_at: ?i64) i64 {
+    _ = created_at;
+    return confirmed_at orelse updated_at;
+}
+
+pub fn isStale(created_at: i64, updated_at: i64, confirmed_at: ?i64, now: i64) bool {
+    return now - freshnessTime(created_at, updated_at, confirmed_at) >= stale_after_seconds;
+}
+
+pub fn formatFreshness(
+    a: std.mem.Allocator,
+    created_at: i64,
+    updated_at: i64,
+    confirmed_at: ?i64,
+    now: i64,
+) ![]const u8 {
+    const label: []const u8 = if (confirmed_at != null)
+        "confirmed"
+    else if (updated_at > created_at)
+        "updated"
+    else
+        "created";
+    const age = try formatAge(a, @max(@as(i64, 0), now - freshnessTime(created_at, updated_at, confirmed_at)));
+    defer a.free(age);
+    if (isStale(created_at, updated_at, confirmed_at, now)) {
+        return std.fmt.allocPrint(a, "{s} {s}, stale?", .{ label, age });
+    }
+    return std.fmt.allocPrint(a, "{s} {s}", .{ label, age });
+}
+
+fn formatAge(a: std.mem.Allocator, seconds: i64) ![]const u8 {
+    if (seconds < 60) return a.dupe(u8, "just now");
+    if (seconds < 60 * 60) return std.fmt.allocPrint(a, "{d}m ago", .{@divFloor(seconds, 60)});
+    if (seconds < 24 * 60 * 60) return std.fmt.allocPrint(a, "{d}h ago", .{@divFloor(seconds, 60 * 60)});
+    if (seconds < 7 * 24 * 60 * 60) return std.fmt.allocPrint(a, "{d}d ago", .{@divFloor(seconds, 24 * 60 * 60)});
+    return std.fmt.allocPrint(a, "{d}w ago", .{@divFloor(seconds, 7 * 24 * 60 * 60)});
+}

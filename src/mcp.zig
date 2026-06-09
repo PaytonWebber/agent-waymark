@@ -80,6 +80,11 @@ const DoneArgs = struct {
     pub const descriptions = .{ .id = "Id of the todo (or entry) to mark done." };
 };
 
+const TouchArgs = struct {
+    id: i64,
+    pub const descriptions = .{ .id = "Id of the entry to confirm as still valid." };
+};
+
 const PinArgs = struct {
     id: i64,
     unpin: bool = false,
@@ -93,6 +98,7 @@ pub const Handler = struct {
     client: *Client,
     repo_scope: []const u8, // default write level
     branch_scope: []const u8, // reads and branch-local writes
+    worktree_root: []const u8,
     author: []const u8,
 
     pub fn listTools(_: *Handler, _: Allocator) !types.ListToolsResult {
@@ -126,6 +132,11 @@ pub const Handler = struct {
                     .inputSchema = comptime types.schemaForStruct(DoneArgs),
                 },
                 .{
+                    .name = "touch",
+                    .description = "Confirm an existing entry is still valid without rewriting it. Use this for old decisions or findings that still hold.",
+                    .inputSchema = comptime types.schemaForStruct(TouchArgs),
+                },
+                .{
                     .name = "pin",
                     .description = "Pin a foundational entry so it always appears in the session header, not subject to recency truncation. Use sparingly. Set unpin to remove.",
                     .inputSchema = comptime types.schemaForStruct(PinArgs),
@@ -140,6 +151,7 @@ pub const Handler = struct {
         if (std.mem.eql(u8, params.name, "timeline")) return self.timeline(a, params);
         if (std.mem.eql(u8, params.name, "supersede")) return self.supersede(a, params);
         if (std.mem.eql(u8, params.name, "done")) return self.done(a, params);
+        if (std.mem.eql(u8, params.name, "touch")) return self.touch(a, params);
         if (std.mem.eql(u8, params.name, "pin")) return self.pin(a, params);
         return error.ToolNotFound;
     }
@@ -162,6 +174,14 @@ pub const Handler = struct {
         return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "Marked #{d} done.", .{args.id}));
     }
 
+    fn touch(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
+        const args = try types.parseArgs(TouchArgs, a, params.arguments);
+        if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
+        const parsed = self.client.call(a, .{ .op = "touch", .id = @intCast(args.id) }) catch return daemonDown(a);
+        if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "touch failed");
+        return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "Confirmed #{d} still valid.", .{args.id}));
+    }
+
     fn record(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
         const args = try types.parseArgs(RecordArgs, a, params.arguments);
         return self.doRecord(a, .{
@@ -170,6 +190,7 @@ pub const Handler = struct {
             .body = args.body,
             .text = args.body,
             .scope = args.scope orelse (if (args.branch_local) self.branch_scope else self.repo_scope),
+            .worktree_root = self.worktree_root,
             .refs = args.refs,
             .author = self.author,
             .supersedes = optId(args.supersedes),
@@ -184,6 +205,7 @@ pub const Handler = struct {
             .body = args.body,
             .text = args.body,
             .scope = args.scope orelse self.repo_scope,
+            .worktree_root = self.worktree_root,
             .author = self.author,
             .supersedes = optId(args.supersedes),
         });
@@ -193,10 +215,14 @@ pub const Handler = struct {
         const parsed = self.client.call(a, req) catch return daemonDown(a);
         const resp = parsed.value;
         if (!resp.ok) return types.CallToolResult.err(a, resp.@"error" orelse "record failed");
-        const msg = if (req.supersedes) |old|
+        const base = if (req.supersedes) |old|
             try std.fmt.allocPrint(a, "Recorded #{d} (supersedes #{d}).", .{ resp.id orelse 0, old })
         else
             try std.fmt.allocPrint(a, "Recorded #{d}.", .{resp.id orelse 0});
+        const msg = if (resp.warning) |warning|
+            try std.fmt.allocPrint(a, "{s}\nWarning: {s}.", .{ base, warning })
+        else
+            base;
         return types.CallToolResult.text(a, msg);
     }
 
@@ -237,7 +263,7 @@ pub const Handler = struct {
 fn formatHit(a: Allocator, h: protocol.HitJson, show_score: bool) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     const w = &out.writer;
-    try w.print("#{d} [{s}]", .{ h.id, h.kind });
+    try w.print("#{d} [{s}] ({s})", .{ h.id, h.kind, h.freshness });
     if (show_score) try w.print(" (score {d:.3})", .{h.score});
     if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
     if (h.refs.len > 0) {
@@ -245,6 +271,13 @@ fn formatHit(a: Allocator, h: protocol.HitJson, show_score: bool) ![]u8 {
         for (h.refs, 0..) |r, i| {
             if (i != 0) try w.writeAll(", ");
             try w.writeAll(r);
+        }
+    }
+    if (h.ref_statuses.len > 0) {
+        try w.writeAll(" ref-status: ");
+        for (h.ref_statuses, 0..) |status, i| {
+            if (i != 0) try w.writeAll(", ");
+            try w.print("{s} {s}", .{ status.status, status.ref });
         }
     }
     try w.print("\n{s}", .{h.body});

@@ -6,6 +6,7 @@
 const std = @import("std");
 const entry_mod = @import("entry.zig");
 const Hit = entry_mod.Hit;
+const RefStatus = entry_mod.RefStatus;
 
 /// A request carries `op` plus whichever fields that op needs; the daemon reads
 /// only the relevant ones. Optionals default to null so a client sends a
@@ -15,6 +16,7 @@ pub const Request = struct {
     op: []const u8,
     kind: ?[]const u8 = null,
     scope: ?[]const u8 = null,
+    worktree_root: ?[]const u8 = null,
     body: ?[]const u8 = null,
     refs: ?[]const []const u8 = null,
     author: ?[]const u8 = null,
@@ -32,11 +34,16 @@ pub const HitJson = struct {
     scope: []const u8,
     body: []const u8,
     refs: []const []const u8,
+    ref_statuses: []const RefStatus,
     author: []const u8,
     supersedes: ?u64 = null,
-    ts: i64,
+    created_at: i64,
+    updated_at: i64,
+    confirmed_at: ?i64 = null,
+    freshness: []const u8,
+    stale: bool,
 
-    pub fn from(h: Hit) HitJson {
+    pub fn from(a: std.mem.Allocator, h: Hit, now: i64) !HitJson {
         return .{
             .id = h.id,
             .score = h.score,
@@ -44,9 +51,14 @@ pub const HitJson = struct {
             .scope = h.scope,
             .body = h.body,
             .refs = h.refs,
+            .ref_statuses = h.ref_statuses,
             .author = h.author,
             .supersedes = h.supersedes,
-            .ts = h.ts,
+            .created_at = h.created_at,
+            .updated_at = h.updated_at,
+            .confirmed_at = h.confirmed_at,
+            .freshness = try entry_mod.formatFreshness(a, h.created_at, h.updated_at, h.confirmed_at, now),
+            .stale = entry_mod.isStale(h.created_at, h.updated_at, h.confirmed_at, now),
         };
     }
 };
@@ -58,6 +70,7 @@ pub const Response = struct {
     count: ?usize = null,
     text: ?[]const u8 = null,
     hits: ?[]const HitJson = null,
+    warning: ?[]const u8 = null,
 
     pub fn err(message: []const u8) Response {
         return .{ .ok = false, .@"error" = message };

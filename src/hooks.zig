@@ -47,7 +47,7 @@ const default_min_score: f32 = 0.45;
 /// likely to be acted on.
 const session_nudge =
     "agent-waymark is active. As you work, record decisions, dead ends, and todos " ++
-    "(record / supersede / done), and recall before re-investigating something, " ++
+    "(record / supersede / touch / done), and recall before re-investigating something, " ++
     "so this work carries to later sessions and sub-agents.";
 
 /// Never returns an error: a hook that fails must not break the session.
@@ -90,7 +90,9 @@ fn body(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: da
 
     const text = blk: {
         if (std.mem.eql(u8, event, "UserPromptSubmit")) {
-            break :blk try recallContext(a, &client, scope.branch_scope, input.prompt orelse return, min_score);
+            const nudge = try activityContext(a, &client);
+            const recall = try recallContext(a, &client, scope.branch_scope, input.prompt orelse return, min_score);
+            break :blk try joinBlocks(a, nudge, recall);
         }
         const header = try headerContext(a, &client, scope.branch_scope);
         // SessionStart re-surfaces the write-discipline nudge every session and
@@ -160,6 +162,18 @@ fn headerContext(a: Allocator, client: *Client, scope: []const u8) ![]const u8 {
     return parsed.value.text orelse "";
 }
 
+fn activityContext(a: Allocator, client: *Client) ![]const u8 {
+    const parsed = try client.call(a, .{ .op = "activity" });
+    if (!parsed.value.ok) return "";
+    return parsed.value.text orelse "";
+}
+
+fn joinBlocks(a: Allocator, first: []const u8, second: []const u8) ![]const u8 {
+    if (first.len == 0) return second;
+    if (second.len == 0) return first;
+    return std.fmt.allocPrint(a, "{s}\n\n{s}", .{ first, second });
+}
+
 /// Prompt-relevant recall for UserPromptSubmit, formatted as a compact block.
 /// Only hits at or above `min_score` are injected, so an off-topic prompt adds
 /// nothing rather than padding the context with weak matches.
@@ -174,7 +188,15 @@ fn recallContext(a: Allocator, client: *Client, scope: []const u8, prompt: []con
     for (hits) |h| {
         if (h.score < min_score) continue; // hits are sorted desc, so this is the tail
         if (shown == 0) try w.writeAll("Possibly relevant prior context from agent-waymark (recall to confirm):\n");
-        try w.print("- #{d} [{s}] {s}\n", .{ h.id, h.kind, h.body });
+        try w.print("- #{d} [{s}, {s}", .{ h.id, h.kind, h.freshness });
+        if (h.ref_statuses.len > 0) {
+            try w.writeAll(", refs ");
+            for (h.ref_statuses[0..@min(h.ref_statuses.len, 2)], 0..) |status, i| {
+                if (i != 0) try w.writeAll(", ");
+                try w.print("{s}: {s}", .{ status.status, status.ref });
+            }
+        }
+        try w.print("] {s}\n", .{h.body});
         shown += 1;
     }
     if (shown == 0) return "";

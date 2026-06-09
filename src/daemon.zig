@@ -27,6 +27,7 @@ const Response = protocol.Response;
 
 const buffer_size = 512 * 1024; // embeddings ~10KB; the sweep sends a transcript tail
 const worker_count = 8;
+const write_duplicate_threshold: f32 = 0.92;
 
 /// Default cosine above which a swept candidate is treated as already known and
 /// skipped. Catches obvious repeats and near-paraphrases; genuinely distinct
@@ -137,16 +138,26 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         const vec = resolveVector(a, io, server.cfg, req, body) catch |e| return embedErr(e);
         lock.lockUncancelable(io);
         defer lock.unlock(io);
+        const duplicate = if (req.supersedes == null)
+            try store.nearestDuplicate(a, vec, req.scope orelse "", write_duplicate_threshold)
+        else
+            null;
         const id = store.record(.{
             .kind = kind,
             .scope = req.scope orelse "",
+            .worktree_root = req.worktree_root,
             .body = body,
             .refs = req.refs orelse &.{},
             .author = req.author orelse "",
             .supersedes = req.supersedes,
             .embedding = vec,
         }) catch |e| return Response.err(@errorName(e));
-        return .{ .ok = true, .id = id, .count = store.count() };
+        return .{
+            .ok = true,
+            .id = id,
+            .count = store.count(),
+            .warning = if (duplicate) |d| try duplicateWarning(a, d) else null,
+        };
     }
 
     if (std.mem.eql(u8, op, "recall")) {
@@ -155,14 +166,14 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         lock.lockSharedUncancelable(io);
         defer lock.unlockShared(io);
         const hits = try store.recall(a, vec, req.scope orelse "", optKind(req.kind), req.limit orelse 5);
-        return hitsResponse(a, hits);
+        return hitsResponse(a, hits, store.nowSeconds());
     }
 
     if (std.mem.eql(u8, op, "timeline")) {
         lock.lockSharedUncancelable(io);
         defer lock.unlockShared(io);
         const hits = try store.timeline(a, req.scope orelse "", optKind(req.kind), req.limit orelse 20);
-        return hitsResponse(a, hits);
+        return hitsResponse(a, hits, store.nowSeconds());
     }
 
     if (std.mem.eql(u8, op, "header")) {
@@ -172,11 +183,25 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         return .{ .ok = true, .text = text };
     }
 
+    if (std.mem.eql(u8, op, "activity")) {
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
+        return .{ .ok = true, .text = try store.promptActivity(a) orelse "" };
+    }
+
     if (std.mem.eql(u8, op, "done")) {
         const id = req.id orelse return Response.err("done requires id");
         lock.lockUncancelable(io);
         defer lock.unlock(io);
         if (!try store.resolve(id)) return Response.err("unknown id");
+        return .{ .ok = true, .count = store.count() };
+    }
+
+    if (std.mem.eql(u8, op, "touch") or std.mem.eql(u8, op, "confirm")) {
+        const id = req.id orelse return Response.err("touch requires id");
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
+        if (!try store.touch(id)) return Response.err("unknown id");
         return .{ .ok = true, .count = store.count() };
     }
 
@@ -238,6 +263,7 @@ fn recordIfNew(
     _ = store.record(.{
         .kind = kind,
         .scope = scope,
+        .worktree_root = null,
         .body = body,
         .author = "agent-waymark-sweep",
         .embedding = vec,
@@ -274,10 +300,18 @@ fn fuzzyKind(s: []const u8) EntryKind {
     return .note;
 }
 
-fn hitsResponse(a: Allocator, hits: []entry_mod.Hit) !Response {
+fn hitsResponse(a: Allocator, hits: []entry_mod.Hit, now: i64) !Response {
     const rows = try a.alloc(protocol.HitJson, hits.len);
-    for (hits, rows) |h, *r| r.* = protocol.HitJson.from(h);
+    for (hits, rows) |h, *r| r.* = try protocol.HitJson.from(a, h, now);
     return .{ .ok = true, .count = hits.len, .hits = rows };
+}
+
+fn duplicateWarning(a: Allocator, h: entry_mod.Hit) ![]const u8 {
+    return std.fmt.allocPrint(
+        a,
+        "similar to #{d} ({s}, score {d:.3}); consider supersede #{d} or touch #{d}",
+        .{ h.id, h.kind.toString(), h.score, h.id, h.id },
+    );
 }
 
 fn embedErr(err: anyerror) Response {
