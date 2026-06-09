@@ -120,7 +120,9 @@ fn quietConnect(socket_path: []const u8) DaemonConnectError!net.Stream {
 
 fn openSocket() DaemonConnectError!posix.socket_t {
     while (true) {
-        const rc = posix.system.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        // Keep the socket type portable. Linux accepts SOCK_CLOEXEC here, but
+        // macOS rejects it for Unix sockets on some releases.
+        const rc = posix.system.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,

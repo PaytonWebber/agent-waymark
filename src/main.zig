@@ -46,6 +46,7 @@ pub fn main(init: std.process.Init) !void {
     if (argv.items.len < 2) return usage();
     const cmd = argv.items[1];
     const args = argv.items[2..];
+    if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return usage();
 
     const cfg: daemon.Config = .{
         .socket_path = env.get("AGENT_WAYMARK_SOCKET") orelse default_socket,
@@ -80,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "install")) {
         return install_mod.run(allocator, io, env, args);
     }
-    if (std.mem.eql(u8, cmd, "doctor")) {
+    if (std.mem.eql(u8, cmd, "doctor") or std.mem.eql(u8, cmd, "--doctor")) {
         return doctor.run(allocator, io, env, cfg, args);
     }
 
@@ -130,7 +131,7 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
         .author = env.get("AGENT_WAYMARK_AUTHOR") orelse "claude-code",
     };
     var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
-        .server_info = .{ .name = "agent-waymark", .version = "0.1.0" },
+        .server_info = .{ .name = "agent-waymark", .version = "0.1.1" },
         .capabilities = .{ .tools = .{} },
         .instructions =
         \\Shared working-state for this project, so work carries across
