@@ -45,7 +45,7 @@ const RecallArgs = struct {
     limit: i64 = 5,
     pub const descriptions = .{
         .query = "What you want to recall, in natural language.",
-        .scope = "Restrict to a scope. Defaults to the current project.",
+        .scope = "Restrict to a scope. Defaults to the current project. Use an empty string to search all scopes in the current store.",
         .kind = "Restrict to one kind. " ++ kinds_doc,
         .limit = "Maximum results (1-50).",
     };
@@ -56,7 +56,7 @@ const TimelineArgs = struct {
     kind: ?[]const u8 = null,
     limit: i64 = 20,
     pub const descriptions = .{
-        .scope = "Restrict to a scope. Defaults to the current project.",
+        .scope = "Restrict to a scope. Defaults to the current project. Use an empty string to list all scopes in the current store.",
         .kind = "Restrict to one kind. " ++ kinds_doc,
         .limit = "Maximum results (1-200).",
     };
@@ -67,11 +67,13 @@ const SupersedeArgs = struct {
     kind: []const u8,
     body: []const u8,
     scope: ?[]const u8 = null,
+    refs: ?[]const []const u8 = null,
     pub const descriptions = .{
         .supersedes = "Id of the entry being replaced.",
         .kind = "Kind of the replacement entry. " ++ kinds_doc,
         .body = "The new content.",
         .scope = "Project/task scope. Defaults to the current project.",
+        .refs = "Optional related file paths, symbols, issue keys, PRs, or \"entry:N\" references.",
     };
 };
 
@@ -91,6 +93,28 @@ const PinArgs = struct {
     pub const descriptions = .{
         .id = "Id of the entry to pin (or unpin).",
         .unpin = "Set true to remove an existing pin.",
+    };
+};
+
+const RefsArgs = struct {
+    action: []const u8,
+    id: i64,
+    ref_name: ?[]const u8 = null,
+    new_ref: ?[]const u8 = null,
+    pub const descriptions = .{
+        .action = "One of: refresh, move, dismiss. refresh accepts current hashes, move updates a renamed ref, dismiss removes an expected stale ref.",
+        .id = "Id of the entry whose refs should be maintained.",
+        .ref_name = "Existing ref for move or dismiss.",
+        .new_ref = "Replacement ref for move.",
+    };
+};
+
+const HandoffArgs = struct {
+    scope: ?[]const u8 = null,
+    limit: i64 = 3,
+    pub const descriptions = .{
+        .scope = "Restrict to a scope. Defaults to the current project. Use an empty string to summarize all scopes in the current store.",
+        .limit = "Maximum entries per section (1-10).",
     };
 };
 
@@ -141,6 +165,17 @@ pub const Handler = struct {
                     .description = "Pin a foundational entry so it always appears in the session header, not subject to recency truncation. Use sparingly. Set unpin to remove.",
                     .inputSchema = comptime types.schemaForStruct(PinArgs),
                 },
+                .{
+                    .name = "refs",
+                    .description = "Maintain file refs on an entry: refresh current hashes, move a ref after a rename, or dismiss an expected stale ref.",
+                    .inputSchema = comptime types.schemaForStruct(RefsArgs),
+                },
+                .{
+                    .name = "handoff",
+                    .description = "Emit a compact next-agent summary grouped by decisions, todos, findings, dead ends, artifacts, and entries needing review.",
+                    .inputSchema = comptime types.schemaForStruct(HandoffArgs),
+                    .annotations = .{ .readOnlyHint = true },
+                },
             },
         };
     }
@@ -153,6 +188,8 @@ pub const Handler = struct {
         if (std.mem.eql(u8, params.name, "done")) return self.done(a, params);
         if (std.mem.eql(u8, params.name, "touch")) return self.touch(a, params);
         if (std.mem.eql(u8, params.name, "pin")) return self.pin(a, params);
+        if (std.mem.eql(u8, params.name, "refs")) return self.refs(a, params);
+        if (std.mem.eql(u8, params.name, "handoff")) return self.handoff(a, params);
         return error.ToolNotFound;
     }
 
@@ -206,9 +243,46 @@ pub const Handler = struct {
             .text = args.body,
             .scope = args.scope orelse self.repo_scope,
             .worktree_root = self.worktree_root,
+            .refs = args.refs,
             .author = self.author,
             .supersedes = optId(args.supersedes),
         });
+    }
+
+    fn refs(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
+        const args = try types.parseArgs(RefsArgs, a, params.arguments);
+        if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
+        if (std.mem.eql(u8, args.action, "move")) {
+            if (args.ref_name == null or args.new_ref == null) {
+                return types.CallToolResult.err(a, "refs move requires ref_name and new_ref");
+            }
+        } else if (std.mem.eql(u8, args.action, "dismiss")) {
+            if (args.ref_name == null) return types.CallToolResult.err(a, "refs dismiss requires ref_name");
+        } else if (!std.mem.eql(u8, args.action, "refresh")) {
+            return types.CallToolResult.err(a, "unknown refs action");
+        }
+
+        const parsed = self.client.call(a, .{
+            .op = "refs",
+            .action = args.action,
+            .id = @intCast(args.id),
+            .ref_name = args.ref_name,
+            .new_ref = args.new_ref,
+            .worktree_root = self.worktree_root,
+        }) catch return daemonDown(a);
+        if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "refs failed");
+        return types.CallToolResult.text(a, parsed.value.text orelse "Updated refs.");
+    }
+
+    fn handoff(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
+        const args = try types.parseArgs(HandoffArgs, a, params.arguments);
+        const parsed = self.client.call(a, .{
+            .op = "handoff",
+            .scope = args.scope orelse self.branch_scope,
+            .limit = clamp(args.limit, 1, 10),
+        }) catch return daemonDown(a);
+        if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "handoff failed");
+        return types.CallToolResult.text(a, parsed.value.text orelse "");
     }
 
     fn doRecord(self: *Handler, a: Allocator, req: Request) !types.CallToolResult {

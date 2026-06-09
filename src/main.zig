@@ -11,7 +11,11 @@
 //!   agent-waymark recall <query>        [--scope S] [--kind K] [--limit N]
 //!   agent-waymark timeline              [--scope S] [--kind K] [--limit N]
 //!   agent-waymark header                [--scope S] [--limit N]
+//!   agent-waymark handoff               [--scope S] [--limit N]
 //!   agent-waymark touch <id>
+//!   agent-waymark refs refresh <id>
+//!   agent-waymark refs move <id> <old-ref> <new-ref>
+//!   agent-waymark refs dismiss <id> <ref>
 //!   agent-waymark forget <id>
 
 const std = @import("std");
@@ -32,7 +36,7 @@ const Request = protocol.Request;
 
 const default_socket = "/tmp/agent-waymark.sock";
 const default_store = "agent-waymark-state.json";
-const version = "0.1.3";
+const version = "0.1.4";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -151,8 +155,14 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
         \\    supersede / touch / done). Capture decisions and dead ends, not
         \\    every thought.
         \\  - If an old entry is still true, touch it instead of rewriting it.
+        \\  - If a file ref warning is expected after a refactor, use refs to
+        \\    refresh, move, or dismiss it.
         \\  - Before investigating something non-trivial, recall first to see
         \\    if it was already decided or tried.
+        \\  - Before handing work to another agent, call handoff and close any
+        \\    obvious done/superseded/stale entries.
+        \\  - If expected context is missing, try recall/timeline with scope ""
+        \\    to inspect all scopes in the current store.
         \\Relevant prior entries are injected automatically at session start
         \\and on each prompt; build on them instead of starting cold.
         ,
@@ -205,6 +215,14 @@ fn buildRequest(a: std.mem.Allocator, cmd: []const u8, args: []const []const u8)
         };
     }
 
+    if (std.mem.eql(u8, cmd, "handoff")) {
+        return .{
+            .op = "handoff",
+            .scope = flag(args, "--scope"),
+            .limit = try optUsize(flag(args, "--limit")),
+        };
+    }
+
     if (std.mem.eql(u8, cmd, "done")) {
         if (args.len < 1) return error.DoneNeedsId;
         return .{ .op = "done", .id = try std.fmt.parseInt(u64, args[0], 10) };
@@ -218,6 +236,35 @@ fn buildRequest(a: std.mem.Allocator, cmd: []const u8, args: []const []const u8)
     if (std.mem.eql(u8, cmd, "pin") or std.mem.eql(u8, cmd, "unpin")) {
         if (args.len < 1) return error.PinNeedsId;
         return .{ .op = cmd, .id = try std.fmt.parseInt(u64, args[0], 10) };
+    }
+
+    if (std.mem.eql(u8, cmd, "refs")) {
+        if (args.len < 2) return error.RefsNeedsActionAndId;
+        const action = args[0];
+        const id = try std.fmt.parseInt(u64, args[1], 10);
+        if (std.mem.eql(u8, action, "refresh")) {
+            return .{ .op = "refs", .action = action, .id = id };
+        }
+        if (std.mem.eql(u8, action, "move")) {
+            if (args.len < 4) return error.RefsMoveNeedsRefs;
+            return .{
+                .op = "refs",
+                .action = action,
+                .id = id,
+                .ref_name = args[2],
+                .new_ref = args[3],
+            };
+        }
+        if (std.mem.eql(u8, action, "dismiss")) {
+            if (args.len < 3) return error.RefsDismissNeedsRef;
+            return .{
+                .op = "refs",
+                .action = action,
+                .id = id,
+                .ref_name = args[2],
+            };
+        }
+        return error.UnknownRefsAction;
     }
 
     if (std.mem.eql(u8, cmd, "forget")) {
@@ -329,8 +376,14 @@ fn usage() void {
         \\  agent-waymark recall <query>        [--scope S] [--kind K] [--limit N]
         \\  agent-waymark timeline              [--scope S] [--kind K] [--limit N]
         \\  agent-waymark header                [--scope S] [--limit N]
+        \\  agent-waymark handoff               [--scope S] [--limit N]
         \\  agent-waymark done <id>             mark a todo done (kept for history)
         \\  agent-waymark touch <id>            confirm an entry is still valid
+        \\  agent-waymark refs refresh <id>     accept current file-ref hashes
+        \\  agent-waymark refs move <id> <old-ref> <new-ref>
+        \\                                     update a ref after a file rename
+        \\  agent-waymark refs dismiss <id> <ref>
+        \\                                     remove an expected stale ref
         \\  agent-waymark pin <id> | unpin <id> always show an entry in the header
         \\  agent-waymark forget <id>
         \\

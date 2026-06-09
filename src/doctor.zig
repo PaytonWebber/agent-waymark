@@ -10,6 +10,7 @@ const scope_mod = @import("scope.zig");
 const Client = client_mod.Client;
 
 const Status = enum { ok, warn, fail };
+const config_read_limit = 16 * 1024 * 1024;
 
 const Check = struct {
     status: Status,
@@ -27,6 +28,11 @@ const JsonReport = struct {
     status: []const u8,
     ok: bool,
     checks: []const JsonCheck,
+};
+
+const DaemonChecks = struct {
+    daemon: Check,
+    store: ?Check = null,
 };
 
 pub fn run(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: daemon.Config, args: []const []const u8) !void {
@@ -58,7 +64,9 @@ fn collectChecks(a: Allocator, allocator: Allocator, io: std.Io, env: *std.proce
     try checks.append(a, .{ .status = .ok, .name = "socket", .detail = cfg.socket_path });
     try checks.append(a, .{ .status = .ok, .name = "store", .detail = cfg.store_path });
     try checks.append(a, .{ .status = .ok, .name = "scope", .detail = scope });
-    try checks.append(a, try daemonCheck(a, allocator, io, cfg));
+    const daemon_checks = try daemonCheck(a, allocator, io, cfg);
+    try checks.append(a, daemon_checks.daemon);
+    if (daemon_checks.store) |store| try checks.append(a, store);
 
     const home = env.get("HOME");
     try checks.append(a, try configCheck(
@@ -100,30 +108,81 @@ fn collectChecks(a: Allocator, allocator: Allocator, io: std.Io, env: *std.proce
     return try checks.toOwnedSlice(a);
 }
 
-fn daemonCheck(a: Allocator, allocator: Allocator, io: std.Io, cfg: daemon.Config) !Check {
+fn daemonCheck(a: Allocator, allocator: Allocator, io: std.Io, cfg: daemon.Config) !DaemonChecks {
     var client: Client = undefined;
     client.init(allocator, io, cfg.socket_path) catch |err| {
         return .{
-            .status = .warn,
-            .name = "daemon",
-            .detail = try std.fmt.allocPrint(a, "not reachable ({s}); normal clients will auto-start it", .{@errorName(err)}),
+            .daemon = .{
+                .status = .warn,
+                .name = "daemon",
+                .detail = try std.fmt.allocPrint(a, "not reachable ({s}); normal clients will auto-start it", .{@errorName(err)}),
+            },
         };
     };
     defer client.deinit();
 
     var call_arena = std.heap.ArenaAllocator.init(allocator);
     defer call_arena.deinit();
-    const parsed = client.call(call_arena.allocator(), .{ .op = "ping" }) catch |err| {
+    const parsed = client.call(call_arena.allocator(), .{ .op = "info" }) catch |err| {
         return .{
+            .daemon = .{
+                .status = .fail,
+                .name = "daemon",
+                .detail = try std.fmt.allocPrint(a, "connected but info failed ({s})", .{@errorName(err)}),
+            },
+        };
+    };
+    if (!parsed.value.ok) return daemonPingFallback(a, &client, call_arena.allocator(), parsed.value.@"error" orelse "info unavailable");
+    if (std.mem.eql(u8, parsed.value.text orelse "", "reachable")) {
+        return .{
+            .daemon = .{ .status = .ok, .name = "daemon", .detail = "reachable" },
+            .store = .{
+                .status = .ok,
+                .name = "daemon store",
+                .detail = try std.fmt.allocPrint(
+                    a,
+                    "{s} ({d} entries)",
+                    .{ parsed.value.store_path orelse "unknown", parsed.value.count orelse 0 },
+                ),
+            },
+        };
+    }
+    return .{
+        .daemon = .{
             .status = .fail,
             .name = "daemon",
-            .detail = try std.fmt.allocPrint(a, "connected but ping failed ({s})", .{@errorName(err)}),
+            .detail = parsed.value.@"error" orelse "unexpected info response",
+        },
+    };
+}
+
+fn daemonPingFallback(a: Allocator, client: *Client, call_a: Allocator, reason: []const u8) !DaemonChecks {
+    const parsed = client.call(call_a, .{ .op = "ping" }) catch |err| {
+        return .{
+            .daemon = .{
+                .status = .fail,
+                .name = "daemon",
+                .detail = try std.fmt.allocPrint(a, "connected but ping failed ({s})", .{@errorName(err)}),
+            },
         };
     };
     if (parsed.value.ok and std.mem.eql(u8, parsed.value.text orelse "", "pong")) {
-        return .{ .status = .ok, .name = "daemon", .detail = "reachable" };
+        return .{
+            .daemon = .{ .status = .ok, .name = "daemon", .detail = "reachable" },
+            .store = .{
+                .status = .warn,
+                .name = "daemon store",
+                .detail = try std.fmt.allocPrint(a, "unknown ({s}); restart the daemon after upgrading", .{reason}),
+            },
+        };
     }
-    return .{ .status = .fail, .name = "daemon", .detail = parsed.value.@"error" orelse "unexpected ping response" };
+    return .{
+        .daemon = .{
+            .status = .fail,
+            .name = "daemon",
+            .detail = parsed.value.@"error" orelse "unexpected ping response",
+        },
+    };
 }
 
 fn fileCheck(a: Allocator, io: std.Io, path: []const u8, name: []const u8, needle: []const u8) !Check {
@@ -178,7 +237,7 @@ fn configCheck(
 }
 
 fn configSource(a: Allocator, io: std.Io, label: []const u8, path: []const u8, needle: []const u8) !ConfigSource {
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1024 * 1024)) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(config_read_limit)) catch |err| switch (err) {
         error.FileNotFound => return .{ .label = label, .path = path, .status = .warn, .configured = false },
         else => return .{
             .label = label,
@@ -228,7 +287,7 @@ fn homePath(a: Allocator, home: ?[]const u8, sub_path: []const u8) !?[]const u8 
 }
 
 fn fileCheckInDir(a: Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, name: []const u8, needle: []const u8) !Check {
-    const bytes = dir.readFileAlloc(io, path, a, .limited(1024 * 1024)) catch |err| switch (err) {
+    const bytes = dir.readFileAlloc(io, path, a, .limited(config_read_limit)) catch |err| switch (err) {
         error.FileNotFound => return .{ .status = .warn, .name = name, .detail = try std.fmt.allocPrint(a, "{s} not found; run agent-waymark install", .{path}) },
         else => return .{ .status = .fail, .name = name, .detail = try std.fmt.allocPrint(a, "could not read {s} ({s})", .{ path, @errorName(err) }) },
     };

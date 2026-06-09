@@ -53,6 +53,12 @@ pub const NewEntry = struct {
     embedding: []const f32,
 };
 
+pub const RefMaintenance = struct {
+    touched: usize = 0,
+    missing: usize = 0,
+    refs: usize = 0,
+};
+
 pub const Store = struct {
     allocator: Allocator,
     io: std.Io,
@@ -67,17 +73,18 @@ pub const Store = struct {
     /// Open (or create) the store backed by the snapshot at `path`. `path` and
     /// `io` are borrowed and must outlive the store.
     pub fn init(allocator: Allocator, io: std.Io, path: []const u8) !Store {
-        const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+        const store_path = try std.fs.path.resolve(allocator, &.{path});
+        errdefer allocator.free(store_path);
+        const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{store_path});
         errdefer allocator.free(tmp_path);
 
         var store: Store = .{
             .allocator = allocator,
             .io = io,
-            .path = try allocator.dupe(u8, path),
+            .path = store_path,
             .tmp_path = tmp_path,
             .index = try Index.init(allocator, 200, 0x5EED),
         };
-        errdefer store.allocator.free(store.path);
         errdefer store.index.deinit(allocator);
 
         try store.load();
@@ -224,6 +231,115 @@ pub const Store = struct {
         try self.persist();
         self.noteWrite();
         return true;
+    }
+
+    pub fn refreshRefs(self: *Store, id: u64) !?RefMaintenance {
+        const ptr = self.entries.getPtr(id) orelse return null;
+        var result: RefMaintenance = .{ .refs = ptr.refs.len };
+        const old_updated_at = ptr.updated_at;
+        errdefer ptr.updated_at = old_updated_at;
+
+        for (ptr.ref_states) |*state| {
+            if (self.hashPath(state.path)) |hash| {
+                state.hash = hash;
+                result.touched += 1;
+            } else {
+                result.missing += 1;
+            }
+        }
+
+        for (ptr.refs) |ref| {
+            if (findRefState(ptr.ref_states, ref) != null) continue;
+            if (try self.captureRefState(ptr.scope, null, ref)) |state| {
+                try self.appendRefState(ptr, state);
+                result.touched += 1;
+            } else {
+                result.missing += 1;
+            }
+        }
+
+        ptr.updated_at = self.nowSeconds();
+        try self.persist();
+        self.noteWrite();
+        return result;
+    }
+
+    pub fn moveRef(self: *Store, id: u64, old_ref: []const u8, new_ref: []const u8, worktree_root: ?[]const u8) !?RefMaintenance {
+        const ptr = self.entries.getPtr(id) orelse return null;
+        const idx = findRef(ptr.refs, old_ref) orelse return error.RefNotFound;
+
+        const new_state = try self.captureRefState(ptr.scope, worktree_root, new_ref) orelse return error.RefTargetMissing;
+        var state_owned = true;
+        errdefer if (state_owned) self.freeRefState(new_state);
+
+        const new_ref_copy = try self.allocator.dupe(u8, new_ref);
+        var ref_owned = true;
+        errdefer if (ref_owned) self.allocator.free(new_ref_copy);
+
+        const old_ref_copy = ptr.refs[idx];
+        ptr.refs[idx] = new_ref_copy;
+        ref_owned = false;
+        self.allocator.free(old_ref_copy);
+        try self.replaceRefState(ptr, old_ref, new_state);
+        state_owned = false;
+        ptr.updated_at = self.nowSeconds();
+
+        try self.persist();
+        self.noteWrite();
+        return .{ .touched = 1, .refs = ptr.refs.len };
+    }
+
+    pub fn dismissRef(self: *Store, id: u64, ref: []const u8) !?RefMaintenance {
+        const ptr = self.entries.getPtr(id) orelse return null;
+        const had_ref = findRef(ptr.refs, ref) != null;
+        const had_state = findRefState(ptr.ref_states, ref) != null;
+        if (!had_ref and !had_state) return error.RefNotFound;
+
+        try self.removeRef(ptr, ref);
+        try self.removeRefState(ptr, ref);
+        ptr.updated_at = self.nowSeconds();
+        try self.persist();
+        self.noteWrite();
+        return .{ .touched = 1, .refs = ptr.refs.len };
+    }
+
+    /// A deterministic handoff summary for the next session or sub-agent. It
+    /// groups the live entries by their operational role instead of returning a
+    /// raw timeline, so overlapping notes do not all look equally important.
+    pub fn handoff(self: *Store, arena: Allocator, scope: []const u8, limit: usize) ![]u8 {
+        const now = self.nowSeconds();
+        const max = @max(limit, 1);
+        var out: std.Io.Writer.Allocating = .init(arena);
+        const w = &out.writer;
+
+        try w.writeAll("# For the next agent\n\n");
+        try w.print("Scope: {s}\n", .{if (scope.len > 0) scope else "all scopes"});
+
+        const review = try self.collectNeedsReview(arena, scope, max, now);
+        const decisions = try self.collect(arena, scope, .decision, null, max);
+        const todos = try self.collect(arena, scope, .todo, null, max);
+        const findings = try self.collect(arena, scope, .finding, null, max);
+        const rejected = try self.collect(arena, scope, .rejected, null, max);
+        const artifacts = try self.collect(arena, scope, .artifact, null, max);
+
+        var sections: usize = 0;
+        sections += try writeHandoffSection(arena, w, "Needs review", review, &.{}, now);
+        sections += try writeHandoffSection(arena, w, "Current decisions", decisions, review, now);
+        sections += try writeHandoffSection(arena, w, "Open todos", todos, review, now);
+        sections += try writeHandoffSection(arena, w, "Open risks and findings", findings, review, now);
+        sections += try writeHandoffSection(arena, w, "Dead ends to avoid", rejected, review, now);
+        sections += try writeHandoffSection(arena, w, "Relevant artifacts", artifacts, review, now);
+
+        if (sections == 0) {
+            try w.writeAll("\nNo active waymarks matched this scope.\n");
+            return out.toOwnedSlice();
+        }
+
+        try w.writeAll("\nClose loop:\n");
+        try w.writeAll("- Mark finished todos with `done <id>`.\n");
+        try w.writeAll("- Confirm durable entries with `touch <id>`.\n");
+        try w.writeAll("- Resolve stale file refs with `refs refresh`, `refs move`, or `refs dismiss`.\n");
+        return out.toOwnedSlice();
     }
 
     /// Follow a supersede chain to its current (un-superseded) head.
@@ -617,10 +733,64 @@ pub const Store = struct {
 
     fn freeRefStates(self: *Store, states: []RefState) void {
         for (states) |state| {
-            self.allocator.free(state.ref);
-            self.allocator.free(state.path);
+            self.freeRefState(state);
         }
         self.allocator.free(states);
+    }
+
+    fn freeRefState(self: *Store, state: RefState) void {
+        self.allocator.free(state.ref);
+        self.allocator.free(state.path);
+    }
+
+    fn appendRefState(self: *Store, e: *Entry, state: RefState) !void {
+        errdefer self.freeRefState(state);
+        const out = try self.allocator.alloc(RefState, e.ref_states.len + 1);
+        @memcpy(out[0..e.ref_states.len], e.ref_states);
+        out[e.ref_states.len] = state;
+        self.allocator.free(e.ref_states);
+        e.ref_states = out;
+    }
+
+    fn replaceRefState(self: *Store, e: *Entry, old_ref: []const u8, state: RefState) !void {
+        if (findRefState(e.ref_states, old_ref)) |idx| {
+            self.freeRefState(e.ref_states[idx]);
+            e.ref_states[idx] = state;
+            return;
+        }
+        try self.appendRefState(e, state);
+    }
+
+    fn removeRef(self: *Store, e: *Entry, ref: []const u8) !void {
+        const idx = findRef(e.refs, ref) orelse return;
+        const out = try self.allocator.alloc([]u8, e.refs.len - 1);
+        var j: usize = 0;
+        for (e.refs, 0..) |existing, i| {
+            if (i == idx) {
+                self.allocator.free(existing);
+                continue;
+            }
+            out[j] = existing;
+            j += 1;
+        }
+        self.allocator.free(e.refs);
+        e.refs = out;
+    }
+
+    fn removeRefState(self: *Store, e: *Entry, ref: []const u8) !void {
+        const idx = findRefState(e.ref_states, ref) orelse return;
+        const out = try self.allocator.alloc(RefState, e.ref_states.len - 1);
+        var j: usize = 0;
+        for (e.ref_states, 0..) |state, i| {
+            if (i == idx) {
+                self.freeRefState(state);
+                continue;
+            }
+            out[j] = state;
+            j += 1;
+        }
+        self.allocator.free(e.ref_states);
+        e.ref_states = out;
     }
 
     fn hashPath(self: *Store, path: []const u8) ?u64 {
@@ -685,6 +855,20 @@ fn jsonRefStates(a: Allocator, states: []const RefState) ![]const RefStateJson {
         dst.* = .{ .ref = src.ref, .path = src.path, .hash = src.hash };
     }
     return out;
+}
+
+fn findRef(refs: [][]u8, needle: []const u8) ?usize {
+    for (refs, 0..) |ref, i| {
+        if (std.mem.eql(u8, ref, needle)) return i;
+    }
+    return null;
+}
+
+fn findRefState(states: []const RefState, needle: []const u8) ?usize {
+    for (states, 0..) |state, i| {
+        if (std.mem.eql(u8, state.ref, needle)) return i;
+    }
+    return null;
 }
 
 fn newerEntry(store: *Store, lhs: u64, rhs: u64) bool {
@@ -788,6 +972,35 @@ fn writeHeaderLine(a: Allocator, w: *std.Io.Writer, h: Hit, now: i64) !void {
     // rather than repo-wide.
     if (std.mem.indexOf(u8, h.scope, "/branch/") != null) try w.writeAll(" [branch]");
     try w.writeByte('\n');
+}
+
+fn writeHandoffSection(
+    a: Allocator,
+    w: *std.Io.Writer,
+    label: []const u8,
+    rows: []const Hit,
+    skip: []const Hit,
+    now: i64,
+) !usize {
+    var wrote_header = false;
+    var written: usize = 0;
+    for (rows) |h| {
+        if (containsHit(skip, h.id)) continue;
+        if (!wrote_header) {
+            try w.print("\n{s}:\n", .{label});
+            wrote_header = true;
+        }
+        try writeHeaderLine(a, w, h, now);
+        written += 1;
+    }
+    return if (written > 0) 1 else 0;
+}
+
+fn containsHit(rows: []const Hit, id: u64) bool {
+    for (rows) |h| {
+        if (h.id == id) return true;
+    }
+    return false;
 }
 
 /// Clip to at most `max` bytes without splitting a UTF-8 sequence, and stop at

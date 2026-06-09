@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.4 (2026-06-09)
+
+### Added
+
+- `agent-waymark handoff` and the MCP `handoff` tool for a compact next-agent
+  summary grouped by decisions, todos, findings, dead ends, artifacts, and
+  entries needing review.
+- `agent-waymark refs refresh|move|dismiss` and the MCP `refs` tool for closing
+  stale file-ref warnings after validation, intentional renames, or expected
+  removals.
+
+### Changed
+
+- Project installs now pin the daemon store under the shared git repo root, so
+  linked worktrees for the same repo use the same Waymark store by default.
+- `agent-waymark doctor` now reports the daemon's actual opened store path.
+- MCP recall and timeline descriptions now explain that an empty scope searches
+  or lists all scopes in the current store.
+
 ## 0.1.3 (2026-06-09)
 
 ### Added

@@ -66,7 +66,8 @@ connected.
 This registers both halves, which is the whole point of the design:
 
 - The **MCP server** (`record`, `recall`, `timeline`, `supersede`, `touch`,
-  `done`, `pin`) is how the model writes and explicitly queries state.
+  `done`, `pin`, `refs`, `handoff`) is how the model writes, curates, and
+  explicitly queries state.
 - The **hooks** are how recall actually happens, since a tool-only server can't
   inject context on its own:
   - `SessionStart` injects the scope header (pinned entries, open todos, recent
@@ -95,7 +96,8 @@ agent-waymark install
 
 That writes `.claude/settings.json` and `.mcp.json` in the current project. It
 preserves existing config and replaces only agent-waymark's own entries on
-repeat runs.
+repeat runs. Project installs pin the daemon store under the shared git repo
+root, so linked worktrees for the same repo use the same Waymark store.
 
 To install Claude hooks and the MCP server at user scope:
 
@@ -143,13 +145,12 @@ To keep project hooks but register the Codex MCP server globally, run
 `agent-waymark install --codex --global-mcp`.
 Codex requires non-managed command hooks to be reviewed and trusted before they
 run; after installing, restart Codex and use `/hooks` to trust agent-waymark's hooks.
-The Codex installer keeps daemon state in the current repo's `.agent-waymark/`
-directory (`.agent-waymark/agent-waymark.sock` and `.agent-waymark/agent-waymark-state.json`) instead of `/tmp`,
-so the config stays workspace-local. Some sandboxed shell surfaces may still
-require approval for Unix socket binding; after restart, verify Codex sees agent-waymark
-with `/mcp` and `/hooks`. The hook config uses Codex's documented hook
-events/trust flow and the `additionalContext` output shape verified in current
-Codex sessions.
+Project installs keep daemon state in the shared git repo root's
+`.agent-waymark/` directory instead of `/tmp`, so linked worktrees for the same
+repo share entries. Some sandboxed shell surfaces may still require approval for
+Unix socket binding; after restart, verify Codex sees agent-waymark with `/mcp`
+and `/hooks`. The hook config uses Codex's documented hook events/trust flow and
+the `additionalContext` output shape verified in current Codex sessions.
 
 ### From source
 
@@ -165,10 +166,10 @@ The Zig build uses [quantal](https://github.com/PaytonWebber/quantal) for the
 embedded vector index and [zig-mcp-sdk](https://github.com/PaytonWebber/zig-mcp-sdk)
 for the MCP protocol and server wiring.
 
-Run `agent-waymark doctor` to check the effective socket/store paths, current
-scope, daemon reachability, and whether Claude/Codex project or user config
-contains agent-waymark entries. Use `agent-waymark doctor --json` for CI or
-package smoke tests.
+Run `agent-waymark doctor` to check the effective socket/store paths, the
+daemon's actual opened store, current scope, daemon reachability, and whether
+Claude/Codex project or user config contains agent-waymark entries. Use
+`agent-waymark doctor --json` for CI or package smoke tests.
 
 ## Quick Check
 
@@ -198,6 +199,9 @@ Do not record every thought. Do not use it as a replacement for README files,
 architecture docs, issue trackers, or source comments. When an entry becomes a
 stable project fact, move it into the repo. When a todo is done, mark it done.
 When an old decision is still true, `touch` it instead of rewriting it.
+Before handing work to another agent, run `handoff` to produce a compact summary
+of the decisions, open todos, findings, dead ends, artifacts, and entries that
+need review.
 
 Entries show freshness in recall, timeline, and injected context. Freshness is
 based on the last confirmation if present, otherwise the last update. Entries
@@ -209,13 +213,17 @@ to an existing active entry, it still records it but warns you to consider
 File refs are checked too. If an entry records a file ref, waymark stores a hash
 of that file at write time. Later recall, timeline, and injected context flag
 the entry if the file changed or disappeared. This does not prove a decision is
-wrong; it tells the agent to verify it before trusting it.
+wrong; it tells the agent to verify it before trusting it. After verification,
+use `refs refresh <id>` when the current file is still the right ref, use
+`refs move <id> <old-ref> <new-ref>` after an intentional rename, or use
+`refs dismiss <id> <ref>` when the ref is no longer useful.
 
 ### Scoping
 
 State is scoped to the **git repository**. Linked git worktrees share the same
-repo-wide scope, but file refs are resolved against the active worktree where
-the entry was recorded. Within a repo, scope is hierarchical:
+repo-wide scope and, for project installs, the same default store. File refs are
+resolved against the active worktree where the entry was recorded. Within a repo,
+scope is hierarchical:
 
 - **Repo-wide** (`repo:<root>`) is the default for writes and is visible from
   every branch. This is where durable decisions, findings, and rejected paths
@@ -244,8 +252,12 @@ agent-waymark record todo "wire up the new endpoint" --branch-local
 agent-waymark recall  "who owns the store?"
 agent-waymark timeline
 agent-waymark header                        # the always-on session summary
+agent-waymark handoff                       # grouped summary for the next agent
 agent-waymark done <id>                     # finish a todo (kept for history)
 agent-waymark touch <id>                    # confirm an entry is still valid
+agent-waymark refs refresh <id>             # accept current file-ref hashes
+agent-waymark refs move <id> old.ts new.ts  # update a ref after a rename
+agent-waymark refs dismiss <id> old.ts      # remove an expected stale ref
 agent-waymark pin <id>                      # always show an entry in the header
 agent-waymark unpin <id>
 ```

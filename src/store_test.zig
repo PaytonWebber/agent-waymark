@@ -363,6 +363,112 @@ test "file refs are flagged when the referenced file changes" {
     try testing.expect(std.mem.indexOf(u8, header, "refs changed: tracked.txt:1") != null);
 }
 
+test "ref maintenance refreshes, moves, and dismisses file refs" {
+    const io = testIo();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(io, tmp.dir);
+    defer cwd.restore();
+
+    cleanup(io);
+    defer cleanup(io);
+
+    const dir = std.Io.Dir.cwd();
+    try dir.writeFile(io, .{ .sub_path = "old.txt", .data = "one\n" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.process.currentPathAlloc(io, a);
+    const scope = try std.fmt.allocPrint(a, "repo:{s}", .{root});
+    const refs = [_][]const u8{"old.txt:1"};
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    const id = try store.record(.{
+        .kind = .finding,
+        .scope = scope,
+        .worktree_root = root,
+        .body = "old file says one",
+        .refs = &refs,
+        .embedding = try axisVec(a, 0),
+    });
+
+    try dir.writeFile(io, .{ .sub_path = "old.txt", .data = "two\n" });
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
+        try testing.expectEqualStrings("changed", hits[0].ref_statuses[0].status);
+    }
+
+    const refreshed = (try store.refreshRefs(id)).?;
+    try testing.expectEqual(@as(usize, 1), refreshed.touched);
+    try testing.expectEqual(@as(usize, 0), refreshed.missing);
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 0), hits[0].ref_statuses.len);
+    }
+
+    try dir.rename("old.txt", dir, "new.txt", io);
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
+        try testing.expectEqualStrings("missing", hits[0].ref_statuses[0].status);
+    }
+
+    _ = (try store.moveRef(id, "old.txt:1", "new.txt:1", root)).?;
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 1), hits[0].refs.len);
+        try testing.expectEqualStrings("new.txt:1", hits[0].refs[0]);
+        try testing.expectEqual(@as(usize, 0), hits[0].ref_statuses.len);
+    }
+
+    try dir.deleteFile(io, "new.txt");
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
+        try testing.expectEqualStrings("missing", hits[0].ref_statuses[0].status);
+    }
+
+    _ = (try store.dismissRef(id, "new.txt:1")).?;
+    {
+        const hits = try store.timeline(a, scope, .finding, 10);
+        try testing.expectEqual(@as(usize, 0), hits[0].refs.len);
+        try testing.expectEqual(@as(usize, 0), hits[0].ref_statuses.len);
+    }
+}
+
+test "handoff groups active entries by role" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    _ = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "use the daemon-owned store", .embedding = try axisVec(a, 0) });
+    _ = try store.record(.{ .kind = .todo, .scope = "repo:x", .body = "close the stale refs", .embedding = try axisVec(a, 1) });
+    _ = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "sub-agents share the socket", .embedding = try axisVec(a, 2) });
+    _ = try store.record(.{ .kind = .rejected, .scope = "repo:x", .body = "do not keep per-process stores", .embedding = try axisVec(a, 3) });
+    _ = try store.record(.{ .kind = .artifact, .scope = "repo:x", .body = "PR #42 contains the migration", .embedding = try axisVec(a, 4) });
+
+    const handoff = try store.handoff(a, "repo:x", 3);
+    try testing.expect(std.mem.indexOf(u8, handoff, "# For the next agent") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Current decisions:") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Open todos:") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Open risks and findings:") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Dead ends to avoid:") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Relevant artifacts:") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Close loop:") != null);
+}
+
 test "scopeVisible is hierarchical (repo-wide inherited, branch isolated)" {
     const v = store_mod.scopeVisible;
     const repo = "repo:/p";

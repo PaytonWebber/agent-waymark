@@ -28,6 +28,16 @@ pub const Info = struct {
     worktree_root: []const u8,
 };
 
+/// Stable project root for project-level state. Linked worktrees resolve to the
+/// shared repo root, so project installs in the main checkout and linked
+/// worktrees use the same store by default.
+pub fn projectRoot(a: std.mem.Allocator, io: std.Io, cwd_override: ?[]const u8) []const u8 {
+    const cwd = cwd_override orelse (std.process.currentPathAlloc(io, a) catch return "");
+    const worktree_root = findGitRoot(a, io, cwd) orelse return cwd;
+    const paths = gitPaths(a, io, worktree_root);
+    return sharedRepoRoot(paths.common_dir) orelse worktree_root;
+}
+
 pub fn detect(a: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, cwd_override: ?[]const u8) Info {
     const cwd = cwd_override orelse (std.process.currentPathAlloc(io, a) catch return flat(""));
     if (env.get("AGENT_WAYMARK_SCOPE")) |s| return .{ .repo_scope = s, .branch_scope = s, .worktree_root = cwd };
@@ -163,6 +173,33 @@ test "linked worktrees share repo scope but keep their own worktree root" {
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "repo:{s}", .{main}), info.repo_scope);
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "repo:{s}/branch/feature", .{main}), info.branch_scope);
     try std.testing.expectEqualStrings(linked, info.worktree_root);
+}
+
+test "projectRoot uses shared repo root for linked worktrees" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    const io = std.testing.io;
+    const dir = std.Io.Dir.cwd();
+    try dir.createDirPath(io, "main/.git/worktrees/linked");
+    try dir.createDirPath(io, "linked");
+    try dir.writeFile(io, .{ .sub_path = "main/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    try dir.writeFile(io, .{ .sub_path = "linked/.git", .data = "gitdir: ../main/.git/worktrees/linked\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/linked/HEAD", .data = "ref: refs/heads/feature\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/linked/commondir", .data = "../..\n" });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = try std.process.currentPathAlloc(io, a);
+    const main = try std.fs.path.join(a, &.{ root, "main" });
+    const linked = try std.fs.path.join(a, &.{ root, "linked" });
+
+    try std.testing.expectEqualStrings(main, projectRoot(a, io, linked));
 }
 
 const TempCwd = struct {

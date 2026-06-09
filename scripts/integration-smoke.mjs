@@ -64,6 +64,46 @@ try {
   const touch = await rpc(socketPath, { op: "touch", id: 1 });
   assert(touch.ok, `touch failed: ${JSON.stringify(touch)}`);
 
+  const trackedPath = path.join(tmp, "tracked.txt");
+  writeFileSync(trackedPath, "one\n");
+  const refEntry = await rpc(socketPath, {
+    op: "record",
+    kind: "finding",
+    scope,
+    body: "integration tracked ref starts clean",
+    text: "integration tracked ref starts clean",
+    refs: [trackedPath],
+    author: "integration",
+    embedding: unitVec(dim, 3),
+  });
+  assert(refEntry.ok && refEntry.id === 3, `ref record failed: ${JSON.stringify(refEntry)}`);
+
+  writeFileSync(trackedPath, "two\n");
+  const changedTimeline = await rpc(socketPath, { op: "timeline", scope, kind: "finding", limit: 5 });
+  const changedRef = changedTimeline.hits?.find((hit) => hit.id === refEntry.id);
+  assert(
+    changedRef?.ref_statuses?.some((status) => status.status === "changed" && status.ref === trackedPath),
+    `timeline did not report changed ref: ${JSON.stringify(changedTimeline)}`,
+  );
+
+  const refreshedRef = await rpc(socketPath, { op: "refs", action: "refresh", id: refEntry.id });
+  assert(
+    refreshedRef.ok && refreshedRef.text?.includes(`Refreshed #${refEntry.id}`),
+    `ref refresh failed: ${JSON.stringify(refreshedRef)}`,
+  );
+  const cleanTimeline = await rpc(socketPath, { op: "timeline", scope, kind: "finding", limit: 5 });
+  const cleanRef = cleanTimeline.hits?.find((hit) => hit.id === refEntry.id);
+  assert(cleanRef?.ref_statuses?.length === 0, `ref refresh did not clear status: ${JSON.stringify(cleanTimeline)}`);
+
+  const handoff = await rpc(socketPath, { op: "handoff", scope, limit: 3 });
+  assert(
+    handoff.ok && handoff.text?.includes("# For the next agent") && handoff.text?.includes("Current decisions:"),
+    `handoff failed: ${JSON.stringify(handoff)}`,
+  );
+
+  const cliHandoff = await runChild(exe, ["handoff", "--scope", scope], env, "");
+  assert(cliHandoff.stdout.includes("# For the next agent"), `CLI handoff missing heading:\n${cliHandoff.stdout}`);
+
   for (let i = 0; i < 3; i += 1) {
     const activity = await rpc(socketPath, { op: "activity" });
     assert(activity.ok && !activity.text, `activity should stay quiet before threshold: ${JSON.stringify(activity)}`);
@@ -96,6 +136,8 @@ try {
   const timeline = JSON.parse(mcpLines[2]);
   assert(init.result?.serverInfo?.name === "agent-waymark", `bad MCP init: ${mcpLines[0]}`);
   assert(tools.result?.tools?.some((tool) => tool.name === "record"), `MCP tools/list missing record: ${mcpLines[1]}`);
+  assert(tools.result?.tools?.some((tool) => tool.name === "refs"), `MCP tools/list missing refs: ${mcpLines[1]}`);
+  assert(tools.result?.tools?.some((tool) => tool.name === "handoff"), `MCP tools/list missing handoff: ${mcpLines[1]}`);
   assert(
     timeline.result?.content?.some((item) => item.text?.includes(body) && item.text?.includes("confirmed")),
     `MCP timeline missing recorded body: ${mcpLines[2]}`,
@@ -215,6 +257,7 @@ async function runDoctor(exe, env, socketPath, storePath) {
   assert(stdout.includes("ok  daemon: reachable"), `doctor did not see daemon:\n${stdout}`);
   assert(stdout.includes(`ok  socket: ${socketPath}`), `doctor did not report socket path:\n${stdout}`);
   assert(stdout.includes(`ok  store: ${storePath}`), `doctor did not report store path:\n${stdout}`);
+  assert(stdout.includes(`ok  daemon store: ${storePath}`), `doctor did not report daemon store path:\n${stdout}`);
 
   const json = await runChild(exe, ["doctor", "--json"], env, "");
   const report = JSON.parse(json.stdout);
@@ -231,6 +274,10 @@ async function runDoctor(exe, env, socketPath, storePath) {
   assert(
     report.checks?.some((check) => check.status === "ok" && check.name === "store" && check.detail === storePath),
     `doctor JSON did not report store path: ${json.stdout}`,
+  );
+  assert(
+    report.checks?.some((check) => check.status === "ok" && check.name === "daemon store" && check.detail.includes(storePath)),
+    `doctor JSON did not report daemon store path: ${json.stdout}`,
   );
 }
 

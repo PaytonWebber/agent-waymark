@@ -25,6 +25,9 @@ pub const Request = struct {
     embedding: ?[]const f32 = null,
     limit: ?usize = null,
     id: ?u64 = null,
+    action: ?[]const u8 = null,
+    ref_name: ?[]const u8 = null,
+    new_ref: ?[]const u8 = null,
 };
 
 pub const HitJson = struct {
@@ -71,6 +74,8 @@ pub const Response = struct {
     text: ?[]const u8 = null,
     hits: ?[]const HitJson = null,
     warning: ?[]const u8 = null,
+    socket_path: ?[]const u8 = null,
+    store_path: ?[]const u8 = null,
 
     pub fn err(message: []const u8) Response {
         return .{ .ok = false, .@"error" = message };
@@ -112,6 +117,9 @@ test "request round-trips through the line codec" {
         .refs = &refs,
         .author = "session:abc/agent:main",
         .supersedes = 7,
+        .action = "move",
+        .ref_name = "src/old.zig",
+        .new_ref = "src/new.zig",
     };
 
     const bytes = try std.json.Stringify.valueAlloc(a, req, .{});
@@ -125,6 +133,9 @@ test "request round-trips through the line codec" {
     try testing.expectEqual(@as(u64, 7), got.supersedes.?);
     try testing.expectEqual(@as(usize, 2), got.refs.?.len);
     try testing.expectEqualStrings("entry:7", got.refs.?[1]);
+    try testing.expectEqualStrings("move", got.action.?);
+    try testing.expectEqualStrings("src/old.zig", got.ref_name.?);
+    try testing.expectEqualStrings("src/new.zig", got.new_ref.?);
 }
 
 test "response error helper" {

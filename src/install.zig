@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 const Array = std.json.Array;
+const scope_mod = @import("scope.zig");
 
 const events = [_][]const u8{ "SessionStart", "UserPromptSubmit", "SubagentStart", "PreCompact" };
 const server_name = "agent-waymark";
@@ -72,7 +73,7 @@ const StatePaths = struct {
 fn installClaude(io: std.Io, env: *std.process.Environ.Map, a: Allocator, exe: []const u8, opts: InstallOptions) !void {
     const cwd = std.Io.Dir.cwd();
     const mcp_global = opts.user or opts.global_mcp;
-    const state = try claudeState(a, env, opts, mcp_global);
+    const state = try claudeState(a, io, env, opts, mcp_global);
     const settings_path = if (opts.user) blk: {
         const home = env.get("HOME") orelse return error.NoHomeDir;
         const dir = try std.fmt.allocPrint(a, "{s}/.claude", .{home});
@@ -116,7 +117,7 @@ fn installCodex(io: std.Io, env: *std.process.Environ.Map, a: Allocator, exe: []
         break :blk path;
     } else hooks_dir;
 
-    const state = try codexState(a, env, opts, mcp_global);
+    const state = try codexState(a, io, env, opts, mcp_global);
     const hooks_path = try std.fmt.allocPrint(a, "{s}/hooks.json", .{hooks_dir});
     const config_path = try std.fmt.allocPrint(a, "{s}/config.toml", .{config_dir});
     try mergeHooks(io, a, hooks_path, exe, .codex, state);
@@ -369,7 +370,7 @@ fn parseOptions(args: []const []const u8) !InstallOptions {
     return opts;
 }
 
-fn claudeState(a: Allocator, env: *std.process.Environ.Map, opts: InstallOptions, mcp_global: bool) !?StatePaths {
+fn claudeState(a: Allocator, io: std.Io, env: *std.process.Environ.Map, opts: InstallOptions, mcp_global: bool) !?StatePaths {
     if (opts.store_path) |store| {
         const state = try customState(a, store);
         return state;
@@ -378,10 +379,11 @@ fn claudeState(a: Allocator, env: *std.process.Environ.Map, opts: InstallOptions
         const state = try userState(a, env);
         return state;
     }
-    return null;
+    const state = try projectState(a, io);
+    return state;
 }
 
-fn codexState(a: Allocator, env: *std.process.Environ.Map, opts: InstallOptions, mcp_global: bool) !?StatePaths {
+fn codexState(a: Allocator, io: std.Io, env: *std.process.Environ.Map, opts: InstallOptions, mcp_global: bool) !?StatePaths {
     if (opts.store_path) |store| {
         const state = try customState(a, store);
         return state;
@@ -390,14 +392,17 @@ fn codexState(a: Allocator, env: *std.process.Environ.Map, opts: InstallOptions,
         const state = try userState(a, env);
         return state;
     }
-    return projectState();
+    const state = try projectState(a, io);
+    return state;
 }
 
-fn projectState() StatePaths {
+fn projectState(a: Allocator, io: std.Io) !StatePaths {
+    const root = scope_mod.projectRoot(a, io, null);
+    const dir = try std.fs.path.join(a, &.{ root, project_state_dir });
     return .{
-        .store_path = project_state_dir ++ "/agent-waymark-state.json",
-        .socket_path = project_state_dir ++ "/agent-waymark.sock",
-        .mkdir_path = project_state_dir,
+        .store_path = try std.fs.path.join(a, &.{ dir, "agent-waymark-state.json" }),
+        .socket_path = try std.fs.path.join(a, &.{ dir, "agent-waymark.sock" }),
+        .mkdir_path = dir,
     };
 }
 
@@ -504,14 +509,28 @@ test "parseOptions accepts global MCP and store path" {
     try std.testing.expectEqualStrings("/tmp/waymark/state.json", opts.store_path.?);
 }
 
-test "stateShellCommand uses repo-local daemon state" {
-    const a = std.testing.allocator;
-    const out = try stateShellCommand(a, "/tmp/it's/agent-waymark", "mcp", projectState());
-    defer a.free(out);
+test "stateShellCommand uses shared project daemon state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "mkdir -p '.agent-waymark'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "AGENT_WAYMARK_SOCKET='.agent-waymark/agent-waymark.sock'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "AGENT_WAYMARK_STORE='.agent-waymark/agent-waymark-state.json'") != null);
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.process.currentPathAlloc(std.testing.io, a);
+    const state_dir = try std.fs.path.join(a, &.{ root, project_state_dir });
+    const state = try projectState(a, std.testing.io);
+    const out = try stateShellCommand(a, "/tmp/it's/agent-waymark", "mcp", state);
+
+    const mkdir = try std.fmt.allocPrint(a, "mkdir -p '{s}'", .{state_dir});
+    const socket = try std.fmt.allocPrint(a, "AGENT_WAYMARK_SOCKET='{s}/agent-waymark.sock'", .{state_dir});
+    const store = try std.fmt.allocPrint(a, "AGENT_WAYMARK_STORE='{s}/agent-waymark-state.json'", .{state_dir});
+
+    try std.testing.expect(std.mem.indexOf(u8, out, mkdir) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, socket) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, store) != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "'/tmp/it'\\''s/agent-waymark' mcp") != null);
 }
 
@@ -546,7 +565,15 @@ test "mcpConfigBytes emits Codex TOML with explicit store path" {
 }
 
 test "codexMcpConfig is idempotent and preserves unrelated tables" {
-    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const old =
         \\profile = "default"
         \\[mcp_servers.other]
@@ -559,10 +586,9 @@ test "codexMcpConfig is idempotent and preserves unrelated tables" {
         \\
     ;
 
-    const once = try codexMcpConfig(a, old, "/tmp/agent-waymark", projectState());
-    defer a.free(once);
-    const twice = try codexMcpConfig(a, once, "/tmp/agent-waymark", projectState());
-    defer a.free(twice);
+    const state = try projectState(a, std.testing.io);
+    const once = try codexMcpConfig(a, old, "/tmp/agent-waymark", state);
+    const twice = try codexMcpConfig(a, once, "/tmp/agent-waymark", state);
 
     try std.testing.expectEqualStrings(once, twice);
     try std.testing.expect(std.mem.indexOf(u8, once, "profile = \"default\"") != null);
@@ -627,10 +653,12 @@ test "project Claude install is idempotent and preserves existing config" {
     defer std.testing.allocator.free(mcp_json);
 
     try std.testing.expectEqual(@as(usize, 1), count(settings, "echo user-hook"));
-    try std.testing.expectEqual(@as(usize, 1), count(settings, "/tmp/agent-waymark hook SessionStart"));
-    try std.testing.expectEqual(@as(usize, 1), count(settings, "/tmp/agent-waymark hook UserPromptSubmit"));
-    try std.testing.expectEqual(@as(usize, 1), count(settings, "/tmp/agent-waymark hook SubagentStart"));
-    try std.testing.expectEqual(@as(usize, 1), count(settings, "/tmp/agent-waymark hook PreCompact"));
+    try std.testing.expectEqual(@as(usize, 1), count(settings, "hook SessionStart"));
+    try std.testing.expectEqual(@as(usize, 1), count(settings, "hook UserPromptSubmit"));
+    try std.testing.expectEqual(@as(usize, 1), count(settings, "hook SubagentStart"));
+    try std.testing.expectEqual(@as(usize, 1), count(settings, "hook PreCompact"));
+    try std.testing.expect(std.mem.indexOf(u8, settings, "AGENT_WAYMARK_STORE=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_json, "AGENT_WAYMARK_STORE=") != null);
     try std.testing.expect(std.mem.indexOf(u8, settings, "\"theme\": \"dark\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, mcp_json, "\"other\"") != null);
     try std.testing.expectEqual(@as(usize, 1), count(mcp_json, "\"agent-waymark\""));
@@ -753,6 +781,9 @@ test "project Codex install is idempotent and preserves existing config" {
     defer env.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+    const root = try std.process.currentPathAlloc(std.testing.io, arena.allocator());
+    const state_dir = try std.fs.path.join(arena.allocator(), &.{ root, project_state_dir });
+    const socket = try std.fmt.allocPrint(arena.allocator(), "AGENT_WAYMARK_SOCKET='{s}/agent-waymark.sock'", .{state_dir});
 
     try installCodex(std.testing.io, &env, arena.allocator(), "/tmp/agent-waymark", .{});
     try installCodex(std.testing.io, &env, arena.allocator(), "/tmp/agent-waymark", .{});
@@ -765,12 +796,46 @@ test "project Codex install is idempotent and preserves existing config" {
     try std.testing.expect(std.mem.indexOf(u8, config, "profile = \"default\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, config, "[mcp_servers.other]") != null);
     try std.testing.expectEqual(@as(usize, 1), count(config, "[mcp_servers.agent-waymark]"));
-    try std.testing.expectEqual(@as(usize, 1), count(config, "AGENT_WAYMARK_SOCKET='.agent-waymark/agent-waymark.sock'"));
+    try std.testing.expectEqual(@as(usize, 1), count(config, socket));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "echo user-hook"));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook SessionStart"));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook UserPromptSubmit"));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook SubagentStart"));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook PreCompact"));
+}
+
+test "project Codex install in linked worktree uses shared repo state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    const io = std.testing.io;
+    const dir = std.Io.Dir.cwd();
+    try dir.createDirPath(io, "main/.git/worktrees/feature");
+    try dir.createDirPath(io, "linked");
+    try dir.writeFile(io, .{ .sub_path = "main/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    try dir.writeFile(io, .{ .sub_path = "linked/.git", .data = "gitdir: ../main/.git/worktrees/feature\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/feature/HEAD", .data = "ref: refs/heads/feature\n" });
+    try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/feature/commondir", .data = "../..\n" });
+
+    try std.process.setCurrentDir(io, "linked");
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const expected_main = scope_mod.projectRoot(a, io, null);
+    const expected_store = try std.fmt.allocPrint(a, "AGENT_WAYMARK_STORE='{s}/.agent-waymark/agent-waymark-state.json'", .{expected_main});
+
+    try installCodex(io, &env, a, "/tmp/agent-waymark", .{});
+
+    const config = try readCwdFile(std.testing.allocator, io, ".codex/config.toml");
+    defer std.testing.allocator.free(config);
+
+    try std.testing.expect(std.mem.indexOf(u8, config, expected_store) != null);
 }
 
 const TempCwd = struct {

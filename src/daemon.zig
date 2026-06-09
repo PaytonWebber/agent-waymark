@@ -129,6 +129,17 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
     const store = server.store;
     const lock = server.lock;
     if (std.mem.eql(u8, op, "ping")) return .{ .ok = true, .text = "pong" };
+    if (std.mem.eql(u8, op, "info")) {
+        lock.lockSharedUncancelable(io);
+        defer lock.unlockShared(io);
+        return .{
+            .ok = true,
+            .text = "reachable",
+            .count = store.count(),
+            .socket_path = server.cfg.socket_path,
+            .store_path = store.path,
+        };
+    }
 
     if (std.mem.eql(u8, op, "record")) {
         const kind_str = req.kind orelse return Response.err("record requires kind");
@@ -183,6 +194,13 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         return .{ .ok = true, .text = text };
     }
 
+    if (std.mem.eql(u8, op, "handoff")) {
+        lock.lockSharedUncancelable(io);
+        defer lock.unlockShared(io);
+        const text = try store.handoff(a, req.scope orelse "", req.limit orelse 3);
+        return .{ .ok = true, .text = text };
+    }
+
     if (std.mem.eql(u8, op, "activity")) {
         lock.lockUncancelable(io);
         defer lock.unlock(io);
@@ -227,6 +245,32 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         defer lock.unlock(io);
         if (!try store.setPinned(id, std.mem.eql(u8, op, "pin"))) return Response.err("unknown id");
         return .{ .ok = true, .count = store.count() };
+    }
+
+    if (std.mem.eql(u8, op, "refs")) {
+        const id = req.id orelse return Response.err("refs requires id");
+        const action = req.action orelse return Response.err("refs requires action");
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
+
+        const result = if (std.mem.eql(u8, action, "refresh"))
+            try store.refreshRefs(id) orelse return Response.err("unknown id")
+        else if (std.mem.eql(u8, action, "move")) blk: {
+            const ref_name = req.ref_name orelse return Response.err("refs move requires ref_name");
+            const new_ref = req.new_ref orelse return Response.err("refs move requires new_ref");
+            break :blk try store.moveRef(id, ref_name, new_ref, req.worktree_root) orelse return Response.err("unknown id");
+        } else if (std.mem.eql(u8, action, "dismiss")) blk: {
+            const ref_name = req.ref_name orelse return Response.err("refs dismiss requires ref_name");
+            break :blk try store.dismissRef(id, ref_name) orelse return Response.err("unknown id");
+        } else {
+            return Response.err("unknown refs action");
+        };
+
+        return .{
+            .ok = true,
+            .count = store.count(),
+            .text = try refsText(a, action, id, req.ref_name, req.new_ref, result),
+        };
     }
 
     if (std.mem.eql(u8, op, "forget")) {
@@ -312,6 +356,38 @@ fn duplicateWarning(a: Allocator, h: entry_mod.Hit) ![]const u8 {
         "similar to #{d} ({s}, score {d:.3}); consider supersede #{d} or touch #{d}",
         .{ h.id, h.kind.toString(), h.score, h.id, h.id },
     );
+}
+
+fn refsText(
+    a: Allocator,
+    action: []const u8,
+    id: u64,
+    ref_name: ?[]const u8,
+    new_ref: ?[]const u8,
+    result: store_mod.RefMaintenance,
+) ![]const u8 {
+    if (std.mem.eql(u8, action, "refresh")) {
+        return std.fmt.allocPrint(
+            a,
+            "Refreshed #{d}: {d} tracked, {d} missing, {d} total.",
+            .{ id, result.touched, result.missing, result.refs },
+        );
+    }
+    if (std.mem.eql(u8, action, "move")) {
+        return std.fmt.allocPrint(
+            a,
+            "Moved ref on #{d}: {s} -> {s}. {d} total.",
+            .{ id, ref_name orelse "", new_ref orelse "", result.refs },
+        );
+    }
+    if (std.mem.eql(u8, action, "dismiss")) {
+        return std.fmt.allocPrint(
+            a,
+            "Dismissed ref on #{d}: {s}. {d} total.",
+            .{ id, ref_name orelse "", result.refs },
+        );
+    }
+    return std.fmt.allocPrint(a, "Updated refs on #{d}.", .{id});
 }
 
 fn embedErr(err: anyerror) Response {
