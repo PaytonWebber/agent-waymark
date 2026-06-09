@@ -151,6 +151,10 @@ zig build integration    # daemon + MCP + hook smoke test (offline, no Ollama)
 
 The integration smoke test also requires Node.js 18 or newer.
 
+The Zig build uses [quantal](https://github.com/PaytonWebber/quantal) for the
+embedded vector index and [zig-mcp-sdk](https://github.com/PaytonWebber/zig-mcp-sdk)
+for the MCP protocol and server wiring.
+
 Run `agent-waymark doctor` from a project to check the effective socket/store paths,
 daemon reachability, and whether Claude/Codex project config contains agent-waymark
 entries. Use `agent-waymark doctor --json` for CI or package smoke tests.
