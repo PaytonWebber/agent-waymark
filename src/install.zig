@@ -34,6 +34,28 @@ pub fn run(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, args
     return installClaude(io, env, a, exe, opts);
 }
 
+pub fn runMcpConfig(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, args: []const []const u8) !void {
+    if (args.len < 1) return error.McpConfigNeedsHarness;
+
+    const exe = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const opts = try parseOptions(args[1..]);
+    const bytes = try mcpConfigBytes(a, env, exe, args[0], opts);
+
+    var buf: [16 * 1024]u8 = undefined;
+    var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    const w = &fw.interface;
+    defer fw.interface.flush() catch {};
+
+    try w.writeAll(bytes);
+    if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') try w.writeByte('\n');
+}
+
 const InstallOptions = struct {
     user: bool = false,
     codex: bool = false,
@@ -126,7 +148,12 @@ fn mergeHooks(io: std.Io, a: Allocator, path: []const u8, exe: []const u8, clien
 fn mergeClaudeMcp(io: std.Io, a: Allocator, path: []const u8, exe: []const u8, state: ?StatePaths) !void {
     var root = try readObject(io, a, path);
     const servers = try ensureObject(a, &root, "mcpServers");
+    try putClaudeMcpServer(a, servers, exe, state);
 
+    try writeObject(io, a, path, root);
+}
+
+fn putClaudeMcpServer(a: Allocator, servers: *Value, exe: []const u8, state: ?StatePaths) !void {
     var args_arr = Array.init(a);
     var entry: ObjectMap = .empty;
     if (state) |paths| {
@@ -140,8 +167,6 @@ fn mergeClaudeMcp(io: std.Io, a: Allocator, path: []const u8, exe: []const u8, s
     }
     try entry.put(a, "args", .{ .array = args_arr });
     try servers.object.put(a, server_name, .{ .object = entry });
-
-    try writeObject(io, a, path, root);
 }
 
 fn mergeCodexMcp(io: std.Io, a: Allocator, path: []const u8, exe: []const u8, state: StatePaths) !void {
@@ -151,6 +176,24 @@ fn mergeCodexMcp(io: std.Io, a: Allocator, path: []const u8, exe: []const u8, st
     };
     const bytes = try codexMcpConfig(a, old, exe, state);
     try writeBytes(io, a, path, bytes);
+}
+
+fn mcpConfigBytes(a: Allocator, env: *std.process.Environ.Map, exe: []const u8, harness: []const u8, opts: InstallOptions) ![]const u8 {
+    const state = if (opts.store_path) |store|
+        try customState(a, store)
+    else
+        try userState(a, env);
+
+    if (std.mem.eql(u8, harness, "claude")) return claudeMcpConfig(a, exe, state);
+    if (std.mem.eql(u8, harness, "codex")) return codexMcpConfig(a, "", exe, state);
+    return error.UnknownMcpConfigHarness;
+}
+
+fn claudeMcpConfig(a: Allocator, exe: []const u8, state: StatePaths) ![]const u8 {
+    var root: Value = .{ .object = .empty };
+    const servers = try ensureObject(a, &root, "mcpServers");
+    try putClaudeMcpServer(a, servers, exe, state);
+    return std.json.Stringify.valueAlloc(a, root, .{ .whitespace = .indent_2 });
 }
 
 fn codexMcpConfig(a: Allocator, old: []const u8, exe: []const u8, state: StatePaths) ![]const u8 {
@@ -470,6 +513,36 @@ test "stateShellCommand uses repo-local daemon state" {
     try std.testing.expect(std.mem.indexOf(u8, out, "AGENT_WAYMARK_SOCKET='.agent-waymark/agent-waymark.sock'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "AGENT_WAYMARK_STORE='.agent-waymark/agent-waymark-state.json'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "'/tmp/it'\\''s/agent-waymark' mcp") != null);
+}
+
+test "mcpConfigBytes emits Claude JSON with user state by default" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/home");
+
+    const a = std.testing.allocator;
+    const out = try mcpConfigBytes(a, &env, "/tmp/agent-waymark", "claude", .{});
+    defer a.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"mcpServers\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"agent-waymark\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "AGENT_WAYMARK_STORE='/tmp/home/.agent-waymark/agent-waymark-state.json'") != null);
+}
+
+test "mcpConfigBytes emits Codex TOML with explicit store path" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    const a = std.testing.allocator;
+    const out = try mcpConfigBytes(a, &env, "/tmp/agent-waymark", "codex", .{ .store_path = "/tmp/waymark/state.json" });
+    defer a.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "[mcp_servers.agent-waymark]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "command = \"sh\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "AGENT_WAYMARK_SOCKET='/tmp/waymark/state.json.sock'") != null);
 }
 
 test "codexMcpConfig is idempotent and preserves unrelated tables" {

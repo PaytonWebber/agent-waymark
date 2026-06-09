@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 (2026-06-09)
+
+### Added
+
+- `agent-waymark --version`.
+- `agent-waymark mcp-config <claude|codex>` for printing copyable MCP server
+  config for external config managers.
+
+### Changed
+
+- `agent-waymark doctor` now checks both project and user-level Claude/Codex
+  config, so user installs are visible from any working directory.
+
 ## 0.1.2 (2026-06-09)
 
 ### Added

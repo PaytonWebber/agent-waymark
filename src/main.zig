@@ -32,6 +32,7 @@ const Request = protocol.Request;
 
 const default_socket = "/tmp/agent-waymark.sock";
 const default_store = "agent-waymark-state.json";
+const version = "0.1.3";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -48,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     const cmd = argv.items[1];
     const args = argv.items[2..];
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return usage();
+    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V") or std.mem.eql(u8, cmd, "version")) return printVersion(io);
 
     const cfg: daemon.Config = .{
         .socket_path = env.get("AGENT_WAYMARK_SOCKET") orelse default_socket,
@@ -81,6 +83,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "install")) {
         return install_mod.run(allocator, io, env, args);
+    }
+    if (std.mem.eql(u8, cmd, "mcp-config")) {
+        return install_mod.runMcpConfig(allocator, io, env, args);
     }
     if (std.mem.eql(u8, cmd, "doctor") or std.mem.eql(u8, cmd, "--doctor")) {
         return doctor.run(allocator, io, env, cfg, args);
@@ -136,7 +141,7 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
         .author = env.get("AGENT_WAYMARK_AUTHOR") orelse "claude-code",
     };
     var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
-        .server_info = .{ .name = "agent-waymark", .version = "0.1.2" },
+        .server_info = .{ .name = "agent-waymark", .version = version },
         .capabilities = .{ .tools = .{} },
         .instructions =
         \\Shared working-state for this project, so work carries across
@@ -311,7 +316,10 @@ fn usage() void {
         \\  agent-waymark install [--user] [--global-mcp] [--store PATH]
         \\                                     register the MCP server + hooks with Claude Code
         \\  agent-waymark install --codex      register the MCP server + hooks with Codex
+        \\  agent-waymark mcp-config <claude|codex> [--store PATH]
+        \\                                     print MCP config for an external config manager
         \\  agent-waymark doctor [--json]       check daemon reachability and project config
+        \\  agent-waymark --version             print the CLI version
         \\  agent-waymark daemon                run the store owner (auto-started otherwise)
         \\  agent-waymark mcp                   run the MCP bridge over stdio
         \\  agent-waymark hook <Event>          run a hook (reads the event JSON on stdin)
@@ -329,6 +337,15 @@ fn usage() void {
         \\kinds: decision finding rejected todo artifact note
         \\
     , .{});
+}
+
+fn printVersion(io: std.Io) !void {
+    var buf: [256]u8 = undefined;
+    var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    const w = &fw.interface;
+    defer fw.interface.flush() catch {};
+
+    try w.print("agent-waymark {s}\n", .{version});
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {

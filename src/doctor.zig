@@ -42,7 +42,7 @@ pub fn run(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg:
     const exe = try std.process.executablePathAlloc(io, a);
     const scope = scope_mod.detect(a, io, env, null);
 
-    const checks = try collectChecks(a, allocator, io, cfg, exe, scope.branch_scope);
+    const checks = try collectChecks(a, allocator, io, env, cfg, exe, scope.branch_scope);
     if (hasFlag(args, "--json")) {
         try writeJson(w, a, checks);
         return;
@@ -52,18 +52,52 @@ pub fn run(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg:
     for (checks) |check| try printCheck(w, check);
 }
 
-fn collectChecks(a: Allocator, allocator: Allocator, io: std.Io, cfg: daemon.Config, exe: []const u8, scope: []const u8) ![]Check {
-    var checks = try a.alloc(Check, 9);
-    checks[0] = .{ .status = .ok, .name = "binary", .detail = exe };
-    checks[1] = .{ .status = .ok, .name = "socket", .detail = cfg.socket_path };
-    checks[2] = .{ .status = .ok, .name = "store", .detail = cfg.store_path };
-    checks[3] = .{ .status = .ok, .name = "scope", .detail = scope };
-    checks[4] = try daemonCheck(a, allocator, io, cfg);
-    checks[5] = try fileCheck(a, io, ".mcp.json", "Claude MCP", "\"agent-waymark\"");
-    checks[6] = try fileCheck(a, io, ".claude/settings.json", "Claude hooks", "agent-waymark");
-    checks[7] = try fileCheck(a, io, ".codex/config.toml", "Codex MCP", "[mcp_servers.agent-waymark]");
-    checks[8] = try fileCheck(a, io, ".codex/hooks.json", "Codex hooks", "agent-waymark");
-    return checks;
+fn collectChecks(a: Allocator, allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, cfg: daemon.Config, exe: []const u8, scope: []const u8) ![]Check {
+    var checks: std.ArrayList(Check) = .empty;
+    try checks.append(a, .{ .status = .ok, .name = "binary", .detail = exe });
+    try checks.append(a, .{ .status = .ok, .name = "socket", .detail = cfg.socket_path });
+    try checks.append(a, .{ .status = .ok, .name = "store", .detail = cfg.store_path });
+    try checks.append(a, .{ .status = .ok, .name = "scope", .detail = scope });
+    try checks.append(a, try daemonCheck(a, allocator, io, cfg));
+
+    const home = env.get("HOME");
+    try checks.append(a, try configCheck(
+        a,
+        io,
+        "Claude MCP",
+        ".mcp.json",
+        try homePath(a, home, ".claude.json"),
+        "\"agent-waymark\"",
+        "agent-waymark install",
+    ));
+    try checks.append(a, try configCheck(
+        a,
+        io,
+        "Claude hooks",
+        ".claude/settings.json",
+        try homePath(a, home, ".claude/settings.json"),
+        "agent-waymark",
+        "agent-waymark install",
+    ));
+    try checks.append(a, try configCheck(
+        a,
+        io,
+        "Codex MCP",
+        ".codex/config.toml",
+        try homePath(a, home, ".codex/config.toml"),
+        "[mcp_servers.agent-waymark]",
+        "agent-waymark install --codex",
+    ));
+    try checks.append(a, try configCheck(
+        a,
+        io,
+        "Codex hooks",
+        ".codex/hooks.json",
+        try homePath(a, home, ".codex/hooks.json"),
+        "agent-waymark",
+        "agent-waymark install --codex",
+    ));
+    return try checks.toOwnedSlice(a);
 }
 
 fn daemonCheck(a: Allocator, allocator: Allocator, io: std.Io, cfg: daemon.Config) !Check {
@@ -94,6 +128,103 @@ fn daemonCheck(a: Allocator, allocator: Allocator, io: std.Io, cfg: daemon.Confi
 
 fn fileCheck(a: Allocator, io: std.Io, path: []const u8, name: []const u8, needle: []const u8) !Check {
     return fileCheckInDir(a, io, std.Io.Dir.cwd(), path, name, needle);
+}
+
+const ConfigSource = struct {
+    label: []const u8,
+    path: []const u8,
+    status: Status,
+    configured: bool,
+    problem: ?[]const u8 = null,
+};
+
+fn configCheck(
+    a: Allocator,
+    io: std.Io,
+    name: []const u8,
+    project_path: []const u8,
+    user_path: ?[]const u8,
+    needle: []const u8,
+    install_cmd: []const u8,
+) !Check {
+    const project = try configSource(a, io, "project", project_path, needle);
+    const user = if (user_path) |path| try configSource(a, io, "user", path, needle) else null;
+
+    var configured: std.ArrayList([]const u8) = .empty;
+    if (project.configured) try configured.append(a, try sourceDetail(a, project));
+    if (user) |src| if (src.configured) try configured.append(a, try sourceDetail(a, src));
+    if (configured.items.len > 0) {
+        return .{ .status = .ok, .name = name, .detail = try joinDetails(a, configured.items) };
+    }
+
+    var failures: std.ArrayList([]const u8) = .empty;
+    if (project.status == .fail) try failures.append(a, project.problem.?);
+    if (user) |src| {
+        if (src.status == .fail) try failures.append(a, src.problem.?);
+    }
+    if (failures.items.len > 0) {
+        return .{ .status = .fail, .name = name, .detail = try joinDetails(a, failures.items) };
+    }
+
+    const user_hint = if (user_path) |path|
+        try std.fmt.allocPrint(a, " or user {s}", .{path})
+    else
+        "";
+    return .{
+        .status = .warn,
+        .name = name,
+        .detail = try std.fmt.allocPrint(a, "not configured in project {s}{s}; run {s}", .{ project_path, user_hint, install_cmd }),
+    };
+}
+
+fn configSource(a: Allocator, io: std.Io, label: []const u8, path: []const u8, needle: []const u8) !ConfigSource {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return .{ .label = label, .path = path, .status = .warn, .configured = false },
+        else => return .{
+            .label = label,
+            .path = path,
+            .status = .fail,
+            .configured = false,
+            .problem = try std.fmt.allocPrint(a, "could not read {s} {s} ({s})", .{ label, path, @errorName(err) }),
+        },
+    };
+    defer a.free(bytes);
+
+    return .{
+        .label = label,
+        .path = path,
+        .status = if (std.mem.indexOf(u8, bytes, needle) != null) .ok else .warn,
+        .configured = std.mem.indexOf(u8, bytes, needle) != null,
+    };
+}
+
+fn sourceDetail(a: Allocator, source: ConfigSource) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s} {s}", .{ source.label, source.path });
+}
+
+fn joinDetails(a: Allocator, items: []const []const u8) ![]const u8 {
+    if (items.len == 0) return "";
+    var total: usize = 0;
+    for (items) |item| total += item.len;
+    total += 2 * (items.len - 1);
+
+    const out = try a.alloc(u8, total);
+    var offset: usize = 0;
+    for (items, 0..) |item, i| {
+        if (i > 0) {
+            @memcpy(out[offset..][0..2], "; ");
+            offset += 2;
+        }
+        @memcpy(out[offset..][0..item.len], item);
+        offset += item.len;
+    }
+    return out;
+}
+
+fn homePath(a: Allocator, home: ?[]const u8, sub_path: []const u8) !?[]const u8 {
+    const root = home orelse return null;
+    const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, sub_path });
+    return path;
 }
 
 fn fileCheckInDir(a: Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, name: []const u8, needle: []const u8) !Check {
@@ -181,6 +312,35 @@ test "fileCheck finds configured entry" {
     try std.testing.expectEqualStrings(".codex/config.toml", check.detail);
 }
 
+test "configCheck finds user config when project config is missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, ".home/.codex");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = ".home/.codex/config.toml",
+        .data = "[mcp_servers.agent-waymark]\ncommand = \"sh\"\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const check = try configCheck(
+        arena.allocator(),
+        std.testing.io,
+        "Codex MCP",
+        ".codex/config.toml",
+        ".home/.codex/config.toml",
+        "[mcp_servers.agent-waymark]",
+        "agent-waymark install --codex",
+    );
+
+    try std.testing.expectEqual(Status.ok, check.status);
+    try std.testing.expect(std.mem.indexOf(u8, check.detail, "user .home/.codex/config.toml") != null);
+}
+
 test "writeJson emits aggregate status and checks" {
     const checks = [_]Check{
         .{ .status = .ok, .name = "binary", .detail = "/tmp/agent-waymark" },
@@ -198,3 +358,21 @@ test "writeJson emits aggregate status and checks" {
     try std.testing.expect(parsed.value.object.get("ok").?.bool);
     try std.testing.expectEqual(@as(usize, 2), parsed.value.object.get("checks").?.array.items.len);
 }
+
+const TempCwd = struct {
+    io: std.Io,
+    old_path: [:0]u8,
+
+    fn enter(io: std.Io, dir: std.Io.Dir) !TempCwd {
+        const old_path = try std.process.currentPathAlloc(io, std.testing.allocator);
+        errdefer std.testing.allocator.free(old_path);
+        try std.process.setCurrentDir(io, dir);
+        return .{ .io = io, .old_path = old_path };
+    }
+
+    fn restore(self: *TempCwd) void {
+        std.process.setCurrentPath(self.io, self.old_path) catch {};
+        std.testing.allocator.free(self.old_path);
+        self.* = undefined;
+    }
+};

@@ -27,6 +27,8 @@ try {
   daemon = spawn(exe, ["daemon"], { env, stdio: ["ignore", "pipe", "pipe"] });
   const daemonLog = collectOutput(daemon);
   await waitForDaemon(socketPath, daemon, daemonLog);
+  await runVersion(exe, env);
+  await runMcpConfig(exe, env, tmp);
   await runDoctor(exe, env, socketPath, storePath);
 
   const scope = `repo:${process.cwd()}`;
@@ -229,6 +231,32 @@ async function runDoctor(exe, env, socketPath, storePath) {
   assert(
     report.checks?.some((check) => check.status === "ok" && check.name === "store" && check.detail === storePath),
     `doctor JSON did not report store path: ${json.stdout}`,
+  );
+}
+
+async function runVersion(exe, env) {
+  const { stdout } = await runChild(exe, ["--version"], env, "");
+  assert(/^agent-waymark \d+\.\d+\.\d+$/.test(stdout.trim()), `bad --version output: ${stdout}`);
+}
+
+async function runMcpConfig(exe, env, dir) {
+  const configStore = path.join(dir, "external-state.json");
+  const claude = await runChild(exe, ["mcp-config", "claude", "--store", configStore], env, "");
+  const claudeJson = JSON.parse(claude.stdout);
+  assert(
+    claudeJson.mcpServers?.["agent-waymark"]?.command === "sh",
+    `Claude MCP config did not emit a server entry: ${claude.stdout}`,
+  );
+  assert(
+    claude.stdout.includes(`AGENT_WAYMARK_STORE='${configStore}'`),
+    `Claude MCP config did not include explicit store path: ${claude.stdout}`,
+  );
+
+  const codex = await runChild(exe, ["mcp-config", "codex", "--store", configStore], env, "");
+  assert(codex.stdout.includes("[mcp_servers.agent-waymark]"), `Codex MCP config missing table: ${codex.stdout}`);
+  assert(
+    codex.stdout.includes(`AGENT_WAYMARK_SOCKET='${configStore}.sock'`),
+    `Codex MCP config did not include derived socket path: ${codex.stdout}`,
   );
 }
 

@@ -121,6 +121,16 @@ The installer also derives the Unix socket path from that file
 starting the daemon. Use the same flag with `--codex`, `--user`, or
 `--global-mcp`.
 
+To print a copyable MCP server config for an external config manager:
+
+```bash
+agent-waymark mcp-config claude
+agent-waymark mcp-config codex --store ~/.agent-waymark/work-state.json
+```
+
+Without `--store`, `mcp-config` uses `~/.agent-waymark/agent-waymark-state.json`
+and `~/.agent-waymark/agent-waymark.sock`.
+
 For Codex, run:
 
 ```bash
@@ -155,9 +165,10 @@ The Zig build uses [quantal](https://github.com/PaytonWebber/quantal) for the
 embedded vector index and [zig-mcp-sdk](https://github.com/PaytonWebber/zig-mcp-sdk)
 for the MCP protocol and server wiring.
 
-Run `agent-waymark doctor` from a project to check the effective socket/store paths,
-daemon reachability, and whether Claude/Codex project config contains agent-waymark
-entries. Use `agent-waymark doctor --json` for CI or package smoke tests.
+Run `agent-waymark doctor` to check the effective socket/store paths, current
+scope, daemon reachability, and whether Claude/Codex project or user config
+contains agent-waymark entries. Use `agent-waymark doctor --json` for CI or
+package smoke tests.
 
 ## Quick Check
 
@@ -165,6 +176,7 @@ After installing and restarting your agent client:
 
 ```bash
 agent-waymark doctor
+agent-waymark --version
 agent-waymark record decision "use agent-waymark for project state"
 agent-waymark recall "project state"
 ```
