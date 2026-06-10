@@ -9,8 +9,8 @@
             .hash = "quantal-0.1.0-13i02JHVAgDwRZNLqCcHHjBDMSLDOhZ7Qp9tnx9yRESb",
         },
         .zig_mcp_sdk = .{
-            .url = "git+https://github.com/PaytonWebber/zig-mcp-sdk.git#3d79347a128cd3a1982a1f6ce85e79e138ce0254",
-            .hash = "zig_mcp_sdk-0.0.0-FT3Vjc5IAgDNLbNrGhCc7nDRq1qdpiYIliMGQFe15gyM",
+            .url = "git+https://github.com/PaytonWebber/zig-mcp-sdk.git?ref=v0.4.0#9a03256291674fdc2a2f27c2116bc469568a90e7",
+            .hash = "zig_mcp_sdk-0.4.0-FT3Vjax4AwAzMde5Pgh-pJHUvZHytPAZ2H2xPkjy9ZHy",
         },
     },
     .paths = .{

@@ -820,7 +820,7 @@ test "project Codex install in linked worktree uses shared repo state" {
     try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/feature/HEAD", .data = "ref: refs/heads/feature\n" });
     try dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/feature/commondir", .data = "../..\n" });
 
-    try std.process.setCurrentDir(io, "linked");
+    try std.process.setCurrentPath(io, "linked");
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
