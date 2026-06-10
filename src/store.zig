@@ -443,24 +443,31 @@ pub const Store = struct {
         const now = self.nowSeconds();
         const pinned = try self.collect(arena, scope, null, true, max_pinned);
         const review = try self.collectNeedsReview(arena, scope, 5, now);
+        const truth_decisions = try self.collect(arena, scope, .decision, false, max_decisions);
+        const truth_artifacts = try self.collect(arena, scope, .artifact, false, max_decisions);
         // The kind sections exclude pinned entries, which appear above.
         const todo_total = self.countMatching(scope, .todo, false);
         const dec_total = self.countMatching(scope, .decision, false);
-        if (pinned.len == 0 and review.len == 0 and todo_total == 0 and dec_total == 0) return "";
+        if (pinned.len == 0 and review.len == 0 and truth_decisions.len == 0 and truth_artifacts.len == 0 and todo_total == 0 and dec_total == 0) return "";
 
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;
+        var seen: std.ArrayList(u64) = .empty;
         try w.print("## agent-waymark state: {s}\n", .{if (scope.len > 0) scope else "all scopes"});
         if (pinned.len > 0) {
             try w.writeAll("\nPinned:\n");
-            for (pinned) |h| try writeHeaderLine(arena, w, h, now);
+            _ = try writeHeaderRows(arena, w, pinned, &.{}, &seen, now, pinned.len);
         }
+
+        const truth_written = try writeCurrentTruth(arena, w, truth_decisions, truth_artifacts, review, &seen, now, max_decisions);
+        _ = truth_written;
+
         if (review.len > 0) {
             try w.writeAll("\nNeeds review:\n");
-            for (review) |h| try writeHeaderLine(arena, w, h, now);
+            _ = try writeHeaderRows(arena, w, review, &.{}, &seen, now, review.len);
         }
-        try self.writeSection(arena, w, scope, .todo, "Open todos", todo_total, max_todos, now);
-        try self.writeSection(arena, w, scope, .decision, "Recent decisions", dec_total, max_decisions, now);
+        try self.writeSection(arena, w, scope, .todo, "Open todos", todo_total, max_todos, now, &seen);
+        try self.writeSection(arena, w, scope, .decision, "Recent decisions", dec_total, max_decisions, now, &seen);
         return out.toOwnedSlice();
     }
 
@@ -474,11 +481,15 @@ pub const Store = struct {
         total: usize,
         max: usize,
         now: i64,
+        seen: *std.ArrayList(u64),
     ) !void {
         if (total == 0) return;
-        const rows = try self.collect(arena, scope, kind, false, max);
+        const rows = try self.collect(arena, scope, kind, false, @min(total, max + seen.items.len + 8));
+        const writable = countWritableRows(rows, &.{}, seen, max);
+        if (writable == 0) return;
         try w.print("\n{s} ({d}):\n", .{ label, total });
-        for (rows) |h| try writeHeaderLine(arena, w, h, now);
+        const written = try writeHeaderRows(arena, w, rows, &.{}, seen, now, max);
+        std.debug.assert(written > 0);
         if (total > rows.len) try w.print("  …and {d} more (recall to see them)\n", .{total - rows.len});
     }
 
@@ -811,6 +822,7 @@ pub const Store = struct {
                 try statuses.append(arena, .{
                     .ref = try arena.dupe(u8, state.ref),
                     .status = s,
+                    .suggestion = if (std.mem.eql(u8, s, "missing")) try replacementSuggestion(arena, self.io, state.path) else null,
                 });
             }
         }
@@ -953,10 +965,65 @@ fn allDigits(s: []const u8) bool {
     return true;
 }
 
+fn writeCurrentTruth(
+    a: Allocator,
+    w: *std.Io.Writer,
+    decisions: []const Hit,
+    artifacts: []const Hit,
+    review: []const Hit,
+    seen: *std.ArrayList(u64),
+    now: i64,
+    max: usize,
+) !usize {
+    const dec_count = countWritableRows(decisions, review, seen, max);
+    const art_count = countWritableRows(artifacts, review, seen, max -| dec_count);
+    if (dec_count + art_count == 0) return 0;
+
+    try w.writeAll("\nCurrent truth:\n");
+    var written = try writeHeaderRows(a, w, decisions, review, seen, now, max);
+    if (written < max) {
+        written += try writeHeaderRows(a, w, artifacts, review, seen, now, max - written);
+    }
+    return written;
+}
+
+fn writeHeaderRows(
+    a: Allocator,
+    w: *std.Io.Writer,
+    rows: []const Hit,
+    skip: []const Hit,
+    seen: *std.ArrayList(u64),
+    now: i64,
+    max: usize,
+) !usize {
+    var written: usize = 0;
+    for (rows) |h| {
+        if (written >= max) break;
+        if (containsHit(skip, h.id) or containsId(seen.items, h.id)) continue;
+        try seen.append(a, h.id);
+        try writeHeaderLine(a, w, h, now);
+        written += 1;
+    }
+    return written;
+}
+
+fn countWritableRows(rows: []const Hit, skip: []const Hit, seen: *const std.ArrayList(u64), max: usize) usize {
+    var count: usize = 0;
+    for (rows) |h| {
+        if (count >= max) break;
+        if (containsHit(skip, h.id) or containsId(seen.items, h.id)) continue;
+        count += 1;
+    }
+    return count;
+}
+
 fn writeHeaderLine(a: Allocator, w: *std.Io.Writer, h: Hit, now: i64) !void {
     const clipped = clip(h.body, 200);
     const freshness = try entry_mod.formatFreshness(a, h.created_at, h.updated_at, h.confirmed_at, now);
-    try w.print("- #{d} [{s}] {s}", .{ h.id, freshness, clipped });
+    const stale = entry_mod.isStale(h.created_at, h.updated_at, h.confirmed_at, now);
+    try w.print("- #{d} [{s}, {s}", .{ h.id, h.kind.toString(), freshness });
+    if (stale or h.ref_statuses.len > 0) try w.writeAll(", needs review");
+    try w.print("] {s}", .{clipped});
     if (clipped.len < h.body.len) try w.writeAll("…");
     if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
     if (h.ref_statuses.len > 0) {
@@ -964,14 +1031,25 @@ fn writeHeaderLine(a: Allocator, w: *std.Io.Writer, h: Hit, now: i64) !void {
         for (h.ref_statuses[0..@min(h.ref_statuses.len, 2)], 0..) |status, i| {
             if (i != 0) try w.writeAll(", ");
             try w.print("{s}: {s}", .{ status.status, status.ref });
+            if (status.suggestion) |suggestion| try w.print(" -> {s}", .{suggestion});
         }
         if (h.ref_statuses.len > 2) try w.print(", +{d}", .{h.ref_statuses.len - 2});
         try w.writeByte(']');
     }
+    if (stale or h.ref_statuses.len > 0) try writeActionHints(w, h);
     // Flag branch-local entries so it's clear which are scoped to this branch
     // rather than repo-wide.
     if (std.mem.indexOf(u8, h.scope, "/branch/") != null) try w.writeAll(" [branch]");
     try w.writeByte('\n');
+}
+
+fn writeActionHints(w: *std.Io.Writer, h: Hit) !void {
+    try w.print(" [actions: touch #{d}, supersede #{d}", .{ h.id, h.id });
+    if (h.kind == .todo) try w.print(", done #{d}", .{h.id});
+    if (h.ref_statuses.len > 0) {
+        try w.print(", refs refresh #{d}, refs move #{d} <old-ref> <new-ref>, refs dismiss #{d} <ref>", .{ h.id, h.id, h.id });
+    }
+    try w.writeByte(']');
 }
 
 fn writeHandoffSection(
@@ -1001,6 +1079,86 @@ fn containsHit(rows: []const Hit, id: u64) bool {
         if (h.id == id) return true;
     }
     return false;
+}
+
+fn containsId(rows: []const u64, id: u64) bool {
+    for (rows) |row| {
+        if (row == id) return true;
+    }
+    return false;
+}
+
+fn replacementSuggestion(a: Allocator, io: std.Io, path: []const u8) !?[]const u8 {
+    const dir_name = std.fs.path.dirname(path) orelse ".";
+    const old_name = std.fs.path.basename(path);
+    const old_ext = std.fs.path.extension(old_name);
+
+    var dir = std.Io.Dir.cwd().openDir(io, dir_name, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+
+    var best_path: ?[]const u8 = null;
+    var best_score: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (std.mem.eql(u8, entry.name, old_name)) continue;
+        if (!std.mem.eql(u8, std.fs.path.extension(entry.name), old_ext)) continue;
+        const score = try replacementScore(a, old_name, entry.name);
+        if (score > best_score) {
+            best_score = score;
+            best_path = try std.fs.path.join(a, &.{ dir_name, entry.name });
+        }
+    }
+
+    if (best_score < 3) return null;
+    return best_path;
+}
+
+fn replacementScore(a: Allocator, old_name: []const u8, candidate_name: []const u8) !usize {
+    const tokens = try nameTokens(a, old_name);
+    const candidate = try lowerAlloc(a, candidate_name);
+    var score: usize = 0;
+    for (tokens) |token| {
+        if (std.mem.indexOf(u8, candidate, token) != null) score += token.len;
+    }
+    return score;
+}
+
+fn nameTokens(a: Allocator, name: []const u8) ![]const []const u8 {
+    const stem = name[0 .. name.len - std.fs.path.extension(name).len];
+    var tokens: std.ArrayList([]const u8) = .empty;
+    var start: ?usize = null;
+    for (stem, 0..) |c, i| {
+        if (!std.ascii.isAlphanumeric(c)) {
+            try appendNameToken(a, &tokens, stem, start, i);
+            start = null;
+            continue;
+        }
+        if (start) |s| {
+            const prev = stem[i - 1];
+            if (i > s and std.ascii.isUpper(c) and std.ascii.isLower(prev)) {
+                try appendNameToken(a, &tokens, stem, start, i);
+                start = i;
+            }
+        } else {
+            start = i;
+        }
+    }
+    try appendNameToken(a, &tokens, stem, start, stem.len);
+    return tokens.toOwnedSlice(a);
+}
+
+fn appendNameToken(a: Allocator, tokens: *std.ArrayList([]const u8), source: []const u8, start: ?usize, end: usize) !void {
+    const s = start orelse return;
+    if (end <= s) return;
+    const raw = source[s..end];
+    if (raw.len < 3) return;
+    try tokens.append(a, try lowerAlloc(a, raw));
+}
+
+fn lowerAlloc(a: Allocator, s: []const u8) ![]const u8 {
+    const out = try a.alloc(u8, s.len);
+    return std.ascii.lowerString(out, s);
 }
 
 /// Clip to at most `max` bytes without splitting a UTF-8 sequence, and stop at

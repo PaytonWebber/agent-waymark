@@ -36,7 +36,7 @@ const Request = protocol.Request;
 
 const default_socket = "/tmp/agent-waymark.sock";
 const default_store = "agent-waymark-state.json";
-const version = "0.1.4";
+const version = "0.1.5";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -341,14 +341,26 @@ fn printResponse(io: std.Io, resp: protocol.Response) !void {
         if (hits.len == 0) try w.writeAll("(no matches)\n");
         for (hits) |h| {
             try w.print("#{d} [{s}] ({s})", .{ h.id, h.kind, h.freshness });
+            if (h.stale or h.ref_statuses.len > 0) try w.writeAll(" needs review");
             if (h.score != 0) try w.print(" {d:.3}", .{h.score});
             if (h.scope.len > 0) try w.print(" {s}", .{h.scope});
             if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
             if (h.ref_statuses.len > 0) {
                 try w.writeAll(" refs:");
-                for (h.ref_statuses) |status| try w.print(" {s} {s}", .{ status.status, status.ref });
+                for (h.ref_statuses) |status| {
+                    try w.print(" {s} {s}", .{ status.status, status.ref });
+                    if (status.suggestion) |suggestion| try w.print(" -> {s}", .{suggestion});
+                }
             }
             try w.print("\n  {s}\n", .{h.body});
+            if (h.stale or h.ref_statuses.len > 0) {
+                try w.print("  actions: touch #{d}, supersede #{d}", .{ h.id, h.id });
+                if (std.mem.eql(u8, h.kind, "todo")) try w.print(", done #{d}", .{h.id});
+                if (h.ref_statuses.len > 0) {
+                    try w.print(", refs refresh #{d}, refs move #{d} <old-ref> <new-ref>, refs dismiss #{d} <ref>", .{ h.id, h.id, h.id });
+                }
+                try w.writeByte('\n');
+            }
         }
     }
     if (resp.hits == null and resp.text == null and resp.id == null) {

@@ -84,6 +84,7 @@ pub const RefStateJson = struct {
 pub const RefStatus = struct {
     ref: []const u8,
     status: []const u8,
+    suggestion: ?[]const u8 = null,
 };
 
 /// On-disk / on-wire form. `kind` is serialized as its tag name so the snapshot

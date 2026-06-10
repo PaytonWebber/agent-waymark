@@ -208,7 +208,9 @@ based on the last confirmation if present, otherwise the last update. Entries
 older than two weeks are flagged `stale?`, which means "verify before relying on
 this." `record` also checks for near-duplicates. If a new entry looks very close
 to an existing active entry, it still records it but warns you to consider
-`supersede` or `touch`.
+`supersede` or `touch`. Injected context groups active decisions and artifacts
+under `Current truth`, then shows entries that need review and open todos below
+that. An entry is shown once per injected block.
 
 File refs are checked too. If an entry records a file ref, waymark stores a hash
 of that file at write time. Later recall, timeline, and injected context flag
@@ -216,7 +218,9 @@ the entry if the file changed or disappeared. This does not prove a decision is
 wrong; it tells the agent to verify it before trusting it. After verification,
 use `refs refresh <id>` when the current file is still the right ref, use
 `refs move <id> <old-ref> <new-ref>` after an intentional rename, or use
-`refs dismiss <id> <ref>` when the ref is no longer useful.
+`refs dismiss <id> <ref>` when the ref is no longer useful. When a referenced
+file is missing, waymark may suggest a similarly named replacement from the same
+directory.
 
 ### Scoping
 

@@ -338,6 +338,7 @@ fn formatHit(a: Allocator, h: protocol.HitJson, show_score: bool) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     const w = &out.writer;
     try w.print("#{d} [{s}] ({s})", .{ h.id, h.kind, h.freshness });
+    if (h.stale or h.ref_statuses.len > 0) try w.writeAll(" needs review");
     if (show_score) try w.print(" (score {d:.3})", .{h.score});
     if (h.supersedes) |s| try w.print(" (supersedes #{d})", .{s});
     if (h.refs.len > 0) {
@@ -352,9 +353,17 @@ fn formatHit(a: Allocator, h: protocol.HitJson, show_score: bool) ![]u8 {
         for (h.ref_statuses, 0..) |status, i| {
             if (i != 0) try w.writeAll(", ");
             try w.print("{s} {s}", .{ status.status, status.ref });
+            if (status.suggestion) |suggestion| try w.print(" -> {s}", .{suggestion});
         }
     }
     try w.print("\n{s}", .{h.body});
+    if (h.stale or h.ref_statuses.len > 0) {
+        try w.print("\nactions: touch #{d}, supersede #{d}", .{ h.id, h.id });
+        if (std.mem.eql(u8, h.kind, "todo")) try w.print(", done #{d}", .{h.id});
+        if (h.ref_statuses.len > 0) {
+            try w.print(", refs refresh #{d}, refs move #{d} <old-ref> <new-ref>, refs dismiss #{d} <ref>", .{ h.id, h.id, h.id });
+        }
+    }
     return out.toOwnedSlice();
 }
 

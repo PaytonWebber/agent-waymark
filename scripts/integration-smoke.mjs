@@ -86,6 +86,16 @@ try {
     `timeline did not report changed ref: ${JSON.stringify(changedTimeline)}`,
   );
 
+  const changedHook = await runHook(exe, env);
+  const changedContext = changedHook.hookSpecificOutput?.additionalContext ?? "";
+  assert(!changedContext.includes(',"hits":['), `hook context leaked raw response JSON: ${changedContext}`);
+  assert(changedContext.includes("Needs review:"), `hook context did not include Needs review:\n${changedContext}`);
+  assert(changedContext.includes("refs refresh"), `hook context did not include ref maintenance actions:\n${changedContext}`);
+  assert(
+    countOccurrences(changedContext, "integration tracked ref starts clean") === 1,
+    `hook context repeated the same ref entry:\n${changedContext}`,
+  );
+
   const refreshedRef = await rpc(socketPath, { op: "refs", action: "refresh", id: refEntry.id });
   assert(
     refreshedRef.ok && refreshedRef.text?.includes(`Refreshed #${refEntry.id}`),
@@ -333,6 +343,17 @@ function unitVec(len, axis) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function countOccurrences(haystack, needle) {
+  let count = 0;
+  let start = 0;
+  while (true) {
+    const idx = haystack.indexOf(needle, start);
+    if (idx < 0) return count;
+    count += 1;
+    start = idx + needle.length;
+  }
 }
 
 function sleep(ms) {

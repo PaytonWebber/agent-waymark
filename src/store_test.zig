@@ -25,6 +25,16 @@ fn cleanup(io: std.Io) void {
     cwd.deleteFile(io, test_path ++ ".tmp") catch {};
 }
 
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var start: usize = 0;
+    while (std.mem.indexOf(u8, haystack[start..], needle)) |idx| {
+        count += 1;
+        start += idx + needle.len;
+    }
+    return count;
+}
+
 fn testIo() std.Io {
     const S = struct {
         var threaded = std.Io.Threaded.init_single_threaded;
@@ -126,9 +136,11 @@ test "header surfaces open todos and recent decisions, skipping superseded" {
     _ = try store.record(.{ .kind = .note, .scope = "repo:other", .body = "unrelated", .embedding = try axisVec(a, 2) });
 
     const header = try store.header(a, "repo:x", 5, 5);
+    try testing.expect(std.mem.indexOf(u8, header, "Current truth:") != null);
     try testing.expect(std.mem.indexOf(u8, header, "wire up the hook kit") != null);
     try testing.expect(std.mem.indexOf(u8, header, "store owned by a daemon") == null); // superseded
     try testing.expect(std.mem.indexOf(u8, header, "store owned by the MCP process") != null);
+    try testing.expectEqual(@as(usize, 1), countOccurrences(header, "store owned by the MCP process"));
     try testing.expect(std.mem.indexOf(u8, header, "unrelated") == null); // other scope
 }
 
@@ -334,7 +346,7 @@ test "file refs are flagged when the referenced file changes" {
     var store = try Store.init(testing.allocator, io, test_path);
     defer store.deinit();
 
-    _ = try store.record(.{
+    const id = try store.record(.{
         .kind = .finding,
         .scope = scope,
         .worktree_root = root,
@@ -361,6 +373,11 @@ test "file refs are flagged when the referenced file changes" {
 
     const header = try store.header(a, scope, 5, 5);
     try testing.expect(std.mem.indexOf(u8, header, "refs changed: tracked.txt:1") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "refs refresh") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "refs move") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "refs dismiss") != null);
+    try testing.expect(std.mem.indexOf(u8, header, try std.fmt.allocPrint(a, "touch #{d}", .{id})) != null);
+    try testing.expectEqual(@as(usize, 1), countOccurrences(header, "tracked file says one"));
 }
 
 test "ref maintenance refreshes, moves, and dismisses file refs" {
@@ -375,14 +392,14 @@ test "ref maintenance refreshes, moves, and dismisses file refs" {
     defer cleanup(io);
 
     const dir = std.Io.Dir.cwd();
-    try dir.writeFile(io, .{ .sub_path = "old.txt", .data = "one\n" });
+    try dir.writeFile(io, .{ .sub_path = "ChatSessionHandler.ts", .data = "one\n" });
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const root = try std.process.currentPathAlloc(io, a);
     const scope = try std.fmt.allocPrint(a, "repo:{s}", .{root});
-    const refs = [_][]const u8{"old.txt:1"};
+    const refs = [_][]const u8{"ChatSessionHandler.ts:1"};
 
     var store = try Store.init(testing.allocator, io, test_path);
     defer store.deinit();
@@ -391,12 +408,12 @@ test "ref maintenance refreshes, moves, and dismisses file refs" {
         .kind = .finding,
         .scope = scope,
         .worktree_root = root,
-        .body = "old file says one",
+        .body = "session handler says one",
         .refs = &refs,
         .embedding = try axisVec(a, 0),
     });
 
-    try dir.writeFile(io, .{ .sub_path = "old.txt", .data = "two\n" });
+    try dir.writeFile(io, .{ .sub_path = "ChatSessionHandler.ts", .data = "two\n" });
     {
         const hits = try store.timeline(a, scope, .finding, 10);
         try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
@@ -411,29 +428,31 @@ test "ref maintenance refreshes, moves, and dismisses file refs" {
         try testing.expectEqual(@as(usize, 0), hits[0].ref_statuses.len);
     }
 
-    try dir.rename("old.txt", dir, "new.txt", io);
+    try dir.rename("ChatSessionHandler.ts", dir, "AgentSessionLifecycleService.ts", io);
     {
         const hits = try store.timeline(a, scope, .finding, 10);
         try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
         try testing.expectEqualStrings("missing", hits[0].ref_statuses[0].status);
+        try testing.expect(hits[0].ref_statuses[0].suggestion != null);
+        try testing.expect(std.mem.endsWith(u8, hits[0].ref_statuses[0].suggestion.?, "AgentSessionLifecycleService.ts"));
     }
 
-    _ = (try store.moveRef(id, "old.txt:1", "new.txt:1", root)).?;
+    _ = (try store.moveRef(id, "ChatSessionHandler.ts:1", "AgentSessionLifecycleService.ts:1", root)).?;
     {
         const hits = try store.timeline(a, scope, .finding, 10);
         try testing.expectEqual(@as(usize, 1), hits[0].refs.len);
-        try testing.expectEqualStrings("new.txt:1", hits[0].refs[0]);
+        try testing.expectEqualStrings("AgentSessionLifecycleService.ts:1", hits[0].refs[0]);
         try testing.expectEqual(@as(usize, 0), hits[0].ref_statuses.len);
     }
 
-    try dir.deleteFile(io, "new.txt");
+    try dir.deleteFile(io, "AgentSessionLifecycleService.ts");
     {
         const hits = try store.timeline(a, scope, .finding, 10);
         try testing.expectEqual(@as(usize, 1), hits[0].ref_statuses.len);
         try testing.expectEqualStrings("missing", hits[0].ref_statuses[0].status);
     }
 
-    _ = (try store.dismissRef(id, "new.txt:1")).?;
+    _ = (try store.dismissRef(id, "AgentSessionLifecycleService.ts:1")).?;
     {
         const hits = try store.timeline(a, scope, .finding, 10);
         try testing.expectEqual(@as(usize, 0), hits[0].refs.len);

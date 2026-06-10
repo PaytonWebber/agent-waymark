@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.5 (2026-06-09)
+
+### Added
+
+- Injected context now includes a `Current truth` section for active decisions
+  and artifacts that do not need review.
+- Missing file refs can show a possible same-directory replacement when a
+  similarly named file exists.
+
+### Changed
+
+- Injected context deduplicates entries across header sections, so an entry
+  that needs review is not repeated under recent decisions.
+- Stale and changed-ref entries now include direct maintenance actions in hook,
+  CLI, and MCP output.
+- Hook output now ends with a newline and the integration smoke test checks that
+  raw response JSON does not leak into injected context.
+
 ## 0.1.4 (2026-06-09)
 
 ### Added

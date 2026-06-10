@@ -188,15 +188,27 @@ fn recallContext(a: Allocator, client: *Client, scope: []const u8, prompt: []con
     for (hits) |h| {
         if (h.score < min_score) continue; // hits are sorted desc, so this is the tail
         if (shown == 0) try w.writeAll("Possibly relevant prior context from agent-waymark (recall to confirm):\n");
-        try w.print("- #{d} [{s}, {s}", .{ h.id, h.kind, h.freshness });
+        try w.print("- #{d} [{s}, recalled, {s}", .{ h.id, h.kind, h.freshness });
+        if (h.ref_statuses.len > 0) {
+            try w.writeAll(", needs review");
+        }
         if (h.ref_statuses.len > 0) {
             try w.writeAll(", refs ");
             for (h.ref_statuses[0..@min(h.ref_statuses.len, 2)], 0..) |status, i| {
                 if (i != 0) try w.writeAll(", ");
                 try w.print("{s}: {s}", .{ status.status, status.ref });
+                if (status.suggestion) |suggestion| try w.print(" -> {s}", .{suggestion});
             }
         }
         try w.print("] {s}\n", .{h.body});
+        if (h.ref_statuses.len > 0 or h.stale) {
+            try w.print("  actions: touch #{d}, supersede #{d}", .{ h.id, h.id });
+            if (std.mem.eql(u8, h.kind, "todo")) try w.print(", done #{d}", .{h.id});
+            if (h.ref_statuses.len > 0) {
+                try w.print(", refs refresh #{d}, refs move #{d} <old-ref> <new-ref>, refs dismiss #{d} <ref>", .{ h.id, h.id, h.id });
+            }
+            try w.writeByte('\n');
+        }
         shown += 1;
     }
     if (shown == 0) return "";
@@ -214,9 +226,10 @@ fn emit(io: std.Io, a: Allocator, event: []const u8, text: []const u8) !void {
     };
     const payload: Out = .{ .hookSpecificOutput = .{ .hookEventName = event, .additionalContext = text } };
 
-    var buf: [4096]u8 = undefined;
+    var buf: [64 * 1024]u8 = undefined;
     var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
     const bytes = try std.json.Stringify.valueAlloc(a, payload, .{});
     try fw.interface.writeAll(bytes);
+    try fw.interface.writeByte('\n');
     try fw.interface.flush();
 }
