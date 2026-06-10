@@ -88,6 +88,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "install")) {
         return install_mod.run(allocator, io, env, args);
     }
+    if (std.mem.eql(u8, cmd, "uninstall")) {
+        return install_mod.runUninstall(allocator, io, env, args);
+    }
     if (std.mem.eql(u8, cmd, "mcp-config")) {
         return install_mod.runMcpConfig(allocator, io, env, args);
     }
@@ -376,6 +379,8 @@ fn usage() void {
         \\  agent-waymark install [--user] [--global-mcp] [--store PATH]
         \\                                     register the MCP server + hooks with Claude Code
         \\  agent-waymark install --codex      register the MCP server + hooks with Codex
+        \\  agent-waymark uninstall [--user] [--codex] [--global-mcp]
+        \\                                     remove the MCP server + hooks config (state is kept)
         \\  agent-waymark mcp-config <claude|codex> [--store PATH]
         \\                                     print MCP config for an external config manager
         \\  agent-waymark doctor [--json]       check daemon reachability and project config

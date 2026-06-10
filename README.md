@@ -22,6 +22,16 @@ shape the design:
   store**; everything else is a thin client. Add auth and a network bind and the
   same daemon is a team server.
 
+## How this differs from a memory MCP
+
+| | typical memory MCP | agent-waymark |
+|---|---|---|
+| Recall | passive: the model must decide to call a search tool | hooks inject relevant state into every session, prompt, and sub-agent |
+| Unit of state | free-text fact or conversation snippet | structured entry: decision, finding, rejected path, todo, artifact |
+| Lifecycle | write and hope | `done`, `supersede`, `touch`, `pin`; staleness and file-ref drift are flagged |
+| Store ownership | per-process | one daemon owns the store; sessions and sub-agents are thin clients |
+| Sub-agents | start blank | seeded with the parent's decisions and open todos |
+
 ## Prerequisites
 
 Supported platforms:
@@ -81,6 +91,11 @@ This registers both halves, which is the whole point of the design:
     survives even when nothing was recorded by hand. Best-effort and opt-in by
     model availability (see below); it runs in a detached worker and no-ops if
     no extraction model is present.
+
+**Hooks fail open.** A hook must never block or break a session: on any failure
+(daemon down, embedding service down, malformed input) it exits 0 with no
+output, and the agent proceeds exactly as if waymark were not installed. The
+worst case is missing context, never a broken session.
 
 ### As a CLI (npm)
 
@@ -170,6 +185,39 @@ Run `agent-waymark doctor` to check the effective socket/store paths, the
 daemon's actual opened store, current scope, daemon reachability, and whether
 Claude/Codex project or user config contains agent-waymark entries. Use
 `agent-waymark doctor --json` for CI or package smoke tests.
+
+## What install writes (and how to remove it)
+
+The installer touches only the files below, is idempotent, and preserves
+everything in them that is not agent-waymark's own entries. All data stays on
+your machine: the store is a JSON file on disk and embeddings come from your
+local Ollama.
+
+| Mode | Files written | Store and socket |
+|---|---|---|
+| `install` | `.claude/settings.json` (hooks), `.mcp.json` (MCP) | `<shared git root>/.agent-waymark/` |
+| `install --user` | `~/.claude/settings.json`, `~/.claude.json` | `~/.agent-waymark/` |
+| `install --global-mcp` | `.claude/settings.json` (hooks), `~/.claude.json` (MCP) | `~/.agent-waymark/` |
+| `install --codex` | `.codex/hooks.json`, `.codex/config.toml` | `<shared git root>/.agent-waymark/` |
+| `install --codex --user` | `~/.codex/hooks.json`, `~/.codex/config.toml` | `~/.agent-waymark/` |
+
+`--store PATH` overrides the store location for any mode; the socket becomes
+`PATH.sock`.
+
+To remove agent-waymark, run `uninstall` with the same flags you installed
+with; it removes agent-waymark's entries from the files in the table and
+leaves everything else in them untouched:
+
+```bash
+agent-waymark uninstall                  # project Claude install
+agent-waymark uninstall --user           # user-level Claude install
+agent-waymark uninstall --codex          # project Codex install
+```
+
+If installed as a plugin, use `/plugin uninstall agent-waymark@agent-waymark`
+instead. Uninstall does not stop a running daemon
+(`pkill -f 'agent-waymark daemon'`) and keeps your recorded entries; delete
+the state directory from the table if you don't want them.
 
 ## Quick Check
 

@@ -127,6 +127,123 @@ fn installCodex(io: std.Io, env: *std.process.Environ.Map, a: Allocator, exe: []
     report("Restart Codex in this directory and review/trust hooks with /hooks.", .{});
 }
 
+/// Remove agent-waymark's hooks and MCP entries from the files `install`
+/// writes, preserving everything else. Never creates files that don't exist.
+pub fn runUninstall(allocator: Allocator, io: std.Io, env: *std.process.Environ.Map, args: []const []const u8) !void {
+    const opts = try parseOptions(args);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    if (opts.codex) {
+        try uninstallCodex(io, env, a, opts);
+    } else {
+        try uninstallClaude(io, env, a, opts);
+    }
+
+    report("The daemon, if running, is not stopped: pkill -f 'agent-waymark daemon'.", .{});
+    report("Recorded entries are kept; delete the .agent-waymark state directory to remove them.", .{});
+}
+
+fn uninstallClaude(io: std.Io, env: *std.process.Environ.Map, a: Allocator, opts: InstallOptions) !void {
+    const mcp_global = opts.user or opts.global_mcp;
+    const settings_path = if (opts.user) blk: {
+        const home = env.get("HOME") orelse return error.NoHomeDir;
+        break :blk try std.fmt.allocPrint(a, "{s}/.claude/settings.json", .{home});
+    } else ".claude/settings.json";
+    const mcp_path = if (mcp_global) blk: {
+        const home = env.get("HOME") orelse return error.NoHomeDir;
+        break :blk try std.fmt.allocPrint(a, "{s}/.claude.json", .{home});
+    } else ".mcp.json";
+
+    reportRemoval(settings_path, try removeHooks(io, a, settings_path));
+    reportRemoval(mcp_path, try removeClaudeMcp(io, a, mcp_path));
+}
+
+fn uninstallCodex(io: std.Io, env: *std.process.Environ.Map, a: Allocator, opts: InstallOptions) !void {
+    const mcp_global = opts.user or opts.global_mcp;
+    const hooks_path = if (opts.user) blk: {
+        const home = env.get("HOME") orelse return error.NoHomeDir;
+        break :blk try std.fmt.allocPrint(a, "{s}/.codex/hooks.json", .{home});
+    } else ".codex/hooks.json";
+    const config_path = if (mcp_global) blk: {
+        const home = env.get("HOME") orelse return error.NoHomeDir;
+        break :blk try std.fmt.allocPrint(a, "{s}/.codex/config.toml", .{home});
+    } else ".codex/config.toml";
+
+    reportRemoval(hooks_path, try removeHooks(io, a, hooks_path));
+    reportRemoval(config_path, try removeCodexMcp(io, a, config_path));
+}
+
+fn reportRemoval(path: []const u8, removed: bool) void {
+    if (removed) {
+        report("Removed agent-waymark entries from {s}.", .{path});
+    } else {
+        report("No agent-waymark entries in {s}.", .{path});
+    }
+}
+
+/// Returns false when the file is absent or carries no agent-waymark entries.
+fn removeHooks(io: std.Io, a: Allocator, path: []const u8) !bool {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    if (bytes.len == 0) return false;
+    var root = std.json.parseFromSliceLeaky(Value, a, bytes, .{}) catch return false;
+    if (root != .object) return false;
+    const hooks_val = root.object.getPtr("hooks") orelse return false;
+    if (hooks_val.* != .object) return false;
+
+    var removed = false;
+    for (events) |event| {
+        const arr_ptr = hooks_val.object.getPtr(event) orelse continue;
+        if (arr_ptr.* != .array) continue;
+        var kept = Array.init(a);
+        for (arr_ptr.array.items) |item| {
+            if (isAgentWaymarkEntry(item)) {
+                removed = true;
+            } else {
+                try kept.append(item);
+            }
+        }
+        arr_ptr.* = .{ .array = kept };
+    }
+    if (!removed) return false;
+
+    try writeObject(io, a, path, root);
+    return true;
+}
+
+fn removeClaudeMcp(io: std.Io, a: Allocator, path: []const u8) !bool {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    if (bytes.len == 0) return false;
+    var root = std.json.parseFromSliceLeaky(Value, a, bytes, .{}) catch return false;
+    if (root != .object) return false;
+    const servers = root.object.getPtr("mcpServers") orelse return false;
+    if (servers.* != .object) return false;
+    if (!servers.object.orderedRemove(server_name)) return false;
+
+    try writeObject(io, a, path, root);
+    return true;
+}
+
+fn removeCodexMcp(io: std.Io, a: Allocator, path: []const u8) !bool {
+    const old = std.Io.Dir.cwd().readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    const kept = try removeTomlTable(a, old, codex_mcp_table);
+    if (std.mem.eql(u8, kept, old)) return false;
+
+    try writeBytes(io, a, path, kept);
+    return true;
+}
+
 const HookClient = enum { claude, codex };
 
 fn mergeHooks(io: std.Io, a: Allocator, path: []const u8, exe: []const u8, client: HookClient, state: ?StatePaths) !void {
@@ -808,6 +925,100 @@ test "project Codex install is idempotent and preserves existing config" {
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook UserPromptSubmit"));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook SubagentStart"));
     try std.testing.expectEqual(@as(usize, 1), count(hooks_json, "hook PreCompact"));
+}
+
+test "uninstall removes claude entries and preserves the rest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, ".claude");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = ".claude/settings.json",
+        .data =
+        \\{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo user-hook"}]}]},"model":"opus"}
+        ,
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = ".mcp.json",
+        .data =
+        \\{"mcpServers":{"other":{"command":"other"}}}
+        ,
+    });
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try installClaude(std.testing.io, &env, a, "/tmp/agent-waymark", .{});
+    try uninstallClaude(std.testing.io, &env, a, .{});
+
+    const settings = try readCwdFile(a, std.testing.io, ".claude/settings.json");
+    const mcp_json = try readCwdFile(a, std.testing.io, ".mcp.json");
+
+    try std.testing.expect(std.mem.indexOf(u8, settings, "agent-waymark") == null);
+    try std.testing.expect(std.mem.indexOf(u8, settings, "echo user-hook") != null);
+    try std.testing.expect(std.mem.indexOf(u8, settings, "\"model\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_json, "agent-waymark") == null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_json, "\"other\"") != null);
+}
+
+test "uninstall removes codex entries and preserves the rest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, ".codex");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = ".codex/config.toml",
+        .data =
+        \\profile = "default"
+        \\[mcp_servers.other]
+        \\command = "other"
+        \\
+        ,
+    });
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try installCodex(std.testing.io, &env, a, "/tmp/agent-waymark", .{ .codex = true });
+    try uninstallCodex(std.testing.io, &env, a, .{ .codex = true });
+
+    const config = try readCwdFile(a, std.testing.io, ".codex/config.toml");
+    const hooks_json = try readCwdFile(a, std.testing.io, ".codex/hooks.json");
+
+    try std.testing.expect(std.mem.indexOf(u8, config, "agent-waymark") == null);
+    try std.testing.expect(std.mem.indexOf(u8, config, "[mcp_servers.other]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, config, "profile = \"default\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hooks_json, "agent-waymark") == null);
+}
+
+test "uninstall creates no files when nothing is installed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try TempCwd.enter(std.testing.io, tmp.dir);
+    defer cwd.restore();
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try uninstallClaude(std.testing.io, &env, a, .{});
+    try uninstallCodex(std.testing.io, &env, a, .{ .codex = true });
+
+    try std.testing.expectError(error.FileNotFound, readCwdFile(a, std.testing.io, ".claude/settings.json"));
+    try std.testing.expectError(error.FileNotFound, readCwdFile(a, std.testing.io, ".mcp.json"));
+    try std.testing.expectError(error.FileNotFound, readCwdFile(a, std.testing.io, ".codex/config.toml"));
 }
 
 test "project Codex install in linked worktree uses shared repo state" {
