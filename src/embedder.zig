@@ -1,86 +1,85 @@
-//! Text → embedding via a local Ollama server.
+//! Text → embedding via a model2vec model compiled into the binary.
 //!
-//! quantal stores raw f32 vectors only, so text must be embedded before it
-//! reaches the index. We call Ollama's `/api/embeddings` endpoint (no API key,
-//! runs offline). The vector dimension is fixed at build time (`build_options.dim`)
-//! because the quantal index type bakes it in at comptime. It MUST match the
-//! model (`nomic-embed-text` = 768).
+//! The bundled model defaults to potion-retrieval-32M quantized to i8
+//! (512d, ~32 MB): static embeddings, so embedding a text is a vocabulary
+//! lookup and a mean. Microseconds per call, works offline, no service to
+//! install, and the retrieval-tuned model matches the old transformer
+//! stack's paraphrase quality on our eval suite. Hybrid recall (lexical +
+//! dense fusion) covers exact identifiers on top.
+//! `zig build -Dmodel=potion-base-8M` bundles the smaller 256d model
+//! instead (~30 MB f32, or ~8 MB after `zig build quantize-model`).
+//!
+//! quantal bakes the vector dimension in at comptime (`build_options.dim`),
+//! so it must match the model; the build derives it from `-Dmodel`.
+//! AGENT_WAYMARK_MODEL_DIR loads a different model2vec model from disk; a
+//! dimension mismatch is rejected at startup rather than corrupting the
+//! index.
+//!
+//! Output vectors are L2-normalized (the model config asks for it), so the
+//! index's inner-product score is cosine similarity and recall can apply a
+//! relevance floor that is comparable across queries.
 
 const std = @import("std");
 const build_options = @import("build_options");
+const m2v = @import("model2vec");
 
-/// The embedding dimension, shared with the quantal index instantiation.
 pub const dim: usize = build_options.dim;
 
-pub const Config = struct {
-    pub const default_url = "http://localhost:11434/api/embeddings";
-    pub const default_model = "nomic-embed-text";
-    // Keep the embedding model resident between calls. The per-prompt hook
-    // embeds on every turn, so a warm model means ~20-30ms instead of a cold
-    // load; this just widens the window so an idle gap doesn't force a reload.
-    pub const default_keep_alive = "30m";
+pub const model_name = build_options.model_name;
 
-    url: []const u8 = default_url,
-    model: []const u8 = default_model,
-    keep_alive: []const u8 = default_keep_alive,
-};
+const bundled_tokenizer = @embedFile("model/" ++ model_name ++ "/tokenizer.json");
+const bundled_safetensors = @embedFile("model/" ++ model_name ++ "/model.safetensors");
 
 pub const Error = error{
-    EmbeddingHttpError,
+    ModelLoadFailed,
     EmbeddingDimMismatch,
 } || std.mem.Allocator.Error;
 
-/// Embed `text` into a freshly allocated `[]f32` of length `dim`, owned by
-/// `allocator`. Network and parse failures surface as `error.EmbeddingHttpError`;
-/// a model whose dimension disagrees with the build is `error.EmbeddingDimMismatch`.
-pub fn embed(io: std.Io, allocator: std.mem.Allocator, cfg: Config, text: []const u8) ![]f32 {
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
+pub const Embedder = struct {
+    model: m2v.Model,
 
-    const body = try std.json.Stringify.valueAlloc(
-        allocator,
-        .{ .model = cfg.model, .prompt = text, .keep_alive = cfg.keep_alive },
-        .{},
-    );
-    defer allocator.free(body);
+    /// `model_dir` overrides the bundled model (AGENT_WAYMARK_MODEL_DIR).
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: ?[]const u8) Error!Embedder {
+        var model = if (model_dir) |dir|
+            m2v.Model.load(gpa, io, dir) catch return error.ModelLoadFailed
+        else
+            m2v.Model.loadFromBytes(gpa, bundled_tokenizer, bundled_safetensors, .{}) catch
+                return error.ModelLoadFailed;
+        errdefer model.deinit();
 
-    var response: std.Io.Writer.Allocating = .init(allocator);
-    defer response.deinit();
+        if (model.dim != dim) return error.EmbeddingDimMismatch;
+        return .{ .model = model };
+    }
 
-    const result = client.fetch(.{
-        .location = .{ .url = cfg.url },
-        .method = .POST,
-        .payload = body,
-        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
-        .response_writer = &response.writer,
-    }) catch return error.EmbeddingHttpError;
+    pub fn deinit(self: *Embedder) void {
+        self.model.deinit();
+    }
 
-    if (result.status != .ok) return error.EmbeddingHttpError;
+    /// Identifies the exact embedding matrix; vectors persist keyed to this.
+    pub fn fingerprint(self: *const Embedder) u64 {
+        return self.model.fingerprint();
+    }
 
-    const Parsed = struct { embedding: []f32 };
-    const parsed = std.json.parseFromSlice(
-        Parsed,
-        allocator,
-        response.written(),
-        .{ .ignore_unknown_fields = true },
-    ) catch return error.EmbeddingHttpError;
-    defer parsed.deinit();
+    /// Embed `text` into a freshly allocated `[]f32` of length `dim`. The
+    /// model is read-only, so concurrent calls are fine as long as each one
+    /// brings its own allocator.
+    pub fn embed(self: *const Embedder, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        return self.model.embed(allocator, text);
+    }
+};
 
-    if (parsed.value.embedding.len != dim) return error.EmbeddingDimMismatch;
+const testing = std.testing;
 
-    const out = try allocator.alloc(f32, dim);
-    @memcpy(out, parsed.value.embedding);
-    normalize(out);
-    return out;
-}
+test "bundled model loads at the built dimension and embeds" {
+    var emb = try Embedder.init(testing.allocator, testing.io, null);
+    defer emb.deinit();
 
-/// L2-normalize in place so the index's inner-product score is cosine
-/// similarity (comparable across queries, which lets recall apply a relevance
-/// floor). Scale-invariant, so it does not affect SimHash routing.
-pub fn normalize(v: []f32) void {
+    const v = try emb.embed(testing.allocator, "the daemon owns the store");
+    defer testing.allocator.free(v);
+    try testing.expectEqual(dim, v.len);
+
+    // Normalized output: unit length.
     var sum: f64 = 0;
     for (v) |x| sum += @as(f64, x) * x;
-    if (sum <= 0) return;
-    const inv: f32 = @floatCast(1.0 / @sqrt(sum));
-    for (v) |*x| x.* *= inv;
+    try testing.expectApproxEqAbs(@as(f64, 1.0), sum, 1e-5);
 }

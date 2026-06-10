@@ -27,17 +27,24 @@ const Response = protocol.Response;
 
 const buffer_size = 512 * 1024; // embeddings ~10KB; the sweep sends a transcript tail
 const worker_count = 8;
-const write_duplicate_threshold: f32 = 0.92;
+// Calibrated for the bundled static-embedding model: typo-level duplicates
+// measure ~0.99, rewordings of the same statement 0.84-0.89, and related but
+// distinct entries fall below 0.2, so 0.85 warns on real repeats with a wide
+// margin against false alarms.
+const write_duplicate_threshold: f32 = 0.85;
 
 /// Default cosine above which a swept candidate is treated as already known and
-/// skipped. Catches obvious repeats and near-paraphrases; genuinely distinct
-/// entries rarely exceed it. Tunable per embedding model via AGENT_WAYMARK_SWEEP_DEDUP.
-pub const default_sweep_dedup: f32 = 0.85;
+/// skipped. Sits slightly below the duplicate-warning threshold because the
+/// sweep suppresses rather than warns; measured rewordings score 0.84-0.89
+/// under the bundled model and distinct entries stay below 0.2. Tunable per
+/// model via AGENT_WAYMARK_SWEEP_DEDUP.
+pub const default_sweep_dedup: f32 = 0.80;
 
 pub const Config = struct {
     socket_path: []const u8,
     store_path: []const u8,
-    embed: embedder.Config = .{},
+    /// Optional model2vec model directory overriding the bundled model.
+    model_dir: ?[]const u8 = null,
     extract: extractor.Config = .{},
     sweep_dedup: f32 = default_sweep_dedup,
 };
@@ -48,6 +55,7 @@ const Server = struct {
     store: *Store,
     lock: *std.Io.RwLock,
     listener: *std.Io.net.Server,
+    embedder: *const embedder.Embedder,
     cfg: Config,
 };
 
@@ -56,7 +64,10 @@ const Server = struct {
 pub fn run(io: std.Io, cfg: Config) !void {
     const allocator = std.heap.smp_allocator;
 
-    var store = try Store.init(allocator, io, cfg.store_path);
+    var emb = try embedder.Embedder.init(allocator, io, cfg.model_dir);
+    defer emb.deinit();
+
+    var store = try Store.initWithEmbedder(allocator, io, cfg.store_path, &emb);
     defer store.deinit();
     var lock: std.Io.RwLock = .init;
 
@@ -70,7 +81,7 @@ pub fn run(io: std.Io, cfg: Config) !void {
         cwd.deleteFile(io, cfg.socket_path) catch {};
     }
 
-    var server: Server = .{ .store = &store, .lock = &lock, .listener = &listener, .cfg = cfg };
+    var server: Server = .{ .store = &store, .lock = &lock, .listener = &listener, .embedder = &emb, .cfg = cfg };
 
     var group: std.Io.Group = .init;
     defer group.cancel(io);
@@ -146,7 +157,7 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         const kind = EntryKind.fromString(kind_str) orelse return Response.err("unknown kind");
         const body = req.body orelse return Response.err("record requires body");
         // Embed outside the lock; the model call is the slow part.
-        const vec = resolveVector(a, io, server.cfg, req, body) catch |e| return embedErr(e);
+        const vec = resolveVector(a, server.embedder, req, body) catch |e| return embedErr(e);
         lock.lockUncancelable(io);
         defer lock.unlock(io);
         const duplicate = if (req.supersedes == null)
@@ -173,10 +184,10 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
 
     if (std.mem.eql(u8, op, "recall")) {
         const query = req.text orelse return Response.err("recall requires query text");
-        const vec = resolveVector(a, io, server.cfg, req, query) catch |e| return embedErr(e);
+        const vec = resolveVector(a, server.embedder, req, query) catch |e| return embedErr(e);
         lock.lockSharedUncancelable(io);
         defer lock.unlockShared(io);
-        const hits = try store.recall(a, vec, req.scope orelse "", optKind(req.kind), req.limit orelse 5);
+        const hits = try store.recallHybrid(a, query, vec, req.scope orelse "", optKind(req.kind), req.limit orelse 5);
         return hitsResponse(a, hits, store.nowSeconds());
     }
 
@@ -233,7 +244,7 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         for (cands) |c| {
             if (c.body.len < 8) continue; // drop empties and leftover placeholders
             const kind = fuzzyKind(c.kind);
-            const vec = embedder.embed(io, a, server.cfg.embed, c.body) catch continue;
+            const vec = server.embedder.embed(a, c.body) catch continue;
             if (recordIfNew(a, io, store, lock, scope, kind, c.body, vec, server.cfg.sweep_dedup)) recorded += 1;
         }
         return .{ .ok = true, .count = recorded };
@@ -317,12 +328,12 @@ fn recordIfNew(
 
 /// Resolve the vector for a request: a precomputed `embedding` (validated) or
 /// embed `text` via the model.
-fn resolveVector(a: Allocator, io: std.Io, cfg: Config, req: Request, text: []const u8) ![]const f32 {
+fn resolveVector(a: Allocator, emb: *const embedder.Embedder, req: Request, text: []const u8) ![]const f32 {
     if (req.embedding) |v| {
         if (v.len != embedder.dim) return error.EmbeddingDimMismatch;
         return v;
     }
-    return embedder.embed(io, a, cfg.embed, text);
+    return emb.embed(a, text);
 }
 
 fn optKind(s: ?[]const u8) ?EntryKind {
@@ -392,8 +403,7 @@ fn refsText(
 
 fn embedErr(err: anyerror) Response {
     return switch (err) {
-        error.EmbeddingDimMismatch => Response.err("embedding dimension does not match the configured model"),
-        error.EmbeddingHttpError => Response.err("could not reach the embedding service (is Ollama running?)"),
+        error.EmbeddingDimMismatch => Response.err("embedding dimension does not match the model"),
         else => Response.err("failed to generate embedding"),
     };
 }

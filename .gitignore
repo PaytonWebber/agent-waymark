@@ -1,21 +1,4 @@
 .zig-cache/
 zig-out/
 zig-pkg/
-*.sock
-agent-waymark-state.json
-agent-waymark-state.json.tmp
-.agent-waymark/
-.codex/
-PLAN.md
-CLAUDE.md
-AGENTS.md
-RELEASE.md
-.agents/
-.claude/
-
-# Build artifacts (produced by scripts/build-dist.mjs at release time)
-node_modules/
-.dist/
-npm/
-binaries/
-*.tgz
+src/model/

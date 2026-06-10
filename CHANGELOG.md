@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The embedding model is now compiled into the binary: potion-retrieval-32M
+  via model2vec, 512-dimensional static embeddings quantized to int8 (~32 MB
+  in the binary, byte-identical to the reference quantizer, ~0.9997 cosine
+  vs f32). `record` and `recall` work offline with nothing installed;
+  embedding takes microseconds in-process instead of a 20-30ms round trip to
+  a local model server, and paraphrase recall on our eval suite matches the
+  old nomic-embed-text stack. Ollama and the `nomic-embed-text` model are no
+  longer required; Ollama remains optional for the `PreCompact` extraction
+  sweep only. `-Dmodel=potion-base-8M` builds a smaller variant.
+- Recall is hybrid: the semantic ranking is fused (reciprocal-rank fusion)
+  with a BM25 ranking over the same candidates, so exact identifiers (file
+  paths, symbols, env var names) match even when the embedding misses them.
+  Hit scores remain cosine similarity; fusion only decides the order.
+- Stores written at a different embedding dimension migrate automatically:
+  entries are re-embedded on first load and the snapshot is rewritten once.
+- `AGENT_WAYMARK_EMBED_URL`, `AGENT_WAYMARK_EMBED_MODEL`, and
+  `AGENT_WAYMARK_EMBED_KEEP_ALIVE` are gone. `AGENT_WAYMARK_MODEL_DIR` loads a
+  different model2vec model from disk (its dimension must match the build).
+
 ## 0.1.5 (2026-06-09)
 
 ### Added

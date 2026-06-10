@@ -71,22 +71,33 @@ Supported platforms:
 Runtime requirements:
 
 - Node.js 18 or newer for the npm launcher and plugin bundle.
-- A local [Ollama](https://ollama.com) server.
-- The `nomic-embed-text` Ollama model. This is the default embedding model and
-  must match the 768-dimensional index build.
+
+That is the whole list. The embedding model (potion-retrieval-32M, 512-d
+static embeddings quantized to int8, ~32 MB) is compiled into the binary, so
+`record` and `recall` work offline, immediately, with nothing else installed.
+Embedding a text takes a few microseconds in-process, and the daemon idles
+under 90 MB resident.
+
+Optional, for the `PreCompact` extraction sweep only:
 
 ```bash
-ollama pull nomic-embed-text   # 768-d, the default (required, for recall)
+ollama pull llama3.2           # a local chat model for transcript extraction
 ```
 
-Optional:
+Without it, `PreCompact` no-ops and everything else works. To build from
+source, install Zig 0.16 and Node.js 18 or newer, then fetch the embedding
+model once with `./scripts/fetch-model.sh`.
+
+For a smaller binary at some cost in paraphrase recall, build with the
+256-d model instead:
 
 ```bash
-ollama pull llama3.2           # enables the PreCompact extraction sweep
+./scripts/fetch-model.sh potion-base-8M
+zig build quantize-model -Dmodel=potion-base-8M
+zig build -Dmodel=potion-base-8M
 ```
 
-Without the optional extraction model, `PreCompact` no-ops and everything else
-works. To build from source, install Zig 0.16 and Node.js 18 or newer.
+An existing store migrates itself on first load, in either direction.
 
 ## Install
 
@@ -111,6 +122,9 @@ This registers both halves, which is the whole point of the design:
     decisions), including after a compaction, so a session starts oriented.
   - `UserPromptSubmit` recalls entries relevant to each prompt and injects the
     strong matches, so recall doesn't depend on the model choosing to ask.
+    Recall is hybrid: semantic similarity and exact-token matching (BM25),
+    fused, so paraphrases and identifiers like file paths or env var names
+    both land.
   - `SubagentStart` seeds a fresh sub-agent with the header, so it doesn't
     re-discover what the parent already worked out.
   - `PreCompact` extracts decisions, findings, and todos from the session
@@ -120,7 +134,7 @@ This registers both halves, which is the whole point of the design:
     no extraction model is present.
 
 **Hooks fail open.** A hook must never block or break a session: on any failure
-(daemon down, embedding service down, malformed input) it exits 0 with no
+(daemon down, malformed input) it exits 0 with no
 output, and the agent proceeds exactly as if waymark were not installed. The
 worst case is missing context, never a broken session.
 
@@ -197,9 +211,11 @@ the `additionalContext` output shape verified in current Codex sessions.
 ### From source
 
 ```bash
-zig build                # build the `agent-waymark` binary (Zig 0.16)
-zig build test           # unit tests (offline, no Ollama)
-zig build integration    # daemon + MCP + hook smoke test (offline, no Ollama)
+./scripts/fetch-model.sh potion-retrieval-32M  # download the model once (~125 MB)
+zig build quantize-model                       # quantize it to i8 in place (~32 MB)
+zig build                                      # build the binary (Zig 0.16)
+zig build test                                 # unit tests (offline)
+zig build integration                          # daemon + MCP + hook smoke test (offline)
 ```
 
 The integration smoke test also requires Node.js 18 or newer.
@@ -257,8 +273,8 @@ agent-waymark record decision "use agent-waymark for project state"
 agent-waymark recall "project state"
 ```
 
-If Ollama is not running, `record` and `recall` will report an embedding service
-error. Start Ollama and try again.
+No services need to be running: the embedding model lives inside the binary,
+and any subcommand auto-starts the daemon.
 
 ### What belongs in waymark
 
@@ -342,8 +358,8 @@ agent-waymark unpin <id>
 ```
 
 Environment knobs: `AGENT_WAYMARK_SOCKET`, `AGENT_WAYMARK_STORE` (socket/snapshot paths);
-`AGENT_WAYMARK_EMBED_URL`, `AGENT_WAYMARK_EMBED_MODEL`, `AGENT_WAYMARK_EMBED_KEEP_ALIVE` (embedding
-endpoint/model and warm-up window); `AGENT_WAYMARK_SCOPE`, `AGENT_WAYMARK_AUTHOR`; `AGENT_WAYMARK_MIN_SCORE`
+`AGENT_WAYMARK_MODEL_DIR` (load a different model2vec embedding model from disk; its
+dimension must match the build, 256 by default); `AGENT_WAYMARK_SCOPE`, `AGENT_WAYMARK_AUTHOR`; `AGENT_WAYMARK_MIN_SCORE`
 (recall floor for the prompt hook); and for the PreCompact sweep,
 `AGENT_WAYMARK_EXTRACT_URL`, `AGENT_WAYMARK_EXTRACT_MODEL` (default `llama3.2`), and
 `AGENT_WAYMARK_SWEEP_DEDUP` (cosine above which a swept entry is treated as already
@@ -356,12 +372,14 @@ record a paraphrase of one already stored), so use a capable local model for it.
 
 ### Latency
 
-The `UserPromptSubmit` hook embeds each prompt before the turn proceeds. With a
-warm model that is ~20-30ms; the only slow case is a cold load after an idle
-gap, which `AGENT_WAYMARK_EMBED_KEEP_ALIVE` (default `30m`) is there to avoid. If you
-want it faster still, point `AGENT_WAYMARK_EMBED_MODEL` at a smaller model (e.g.
-`all-minilm`); the query and stored vectors must use the same model, so delete
-the store (or re-record) when you switch.
+The `UserPromptSubmit` hook embeds each prompt before the turn proceeds.
+Embedding runs in-process against the bundled static-embedding model and takes
+about 4 microseconds, so the hook's end-to-end cost is the unix socket round
+trip: well under a millisecond, with no warm-up and no cold start.
+
+A store written by an older build at a different embedding dimension is
+migrated automatically: the daemon re-embeds every entry on first load (also
+microseconds each) and rewrites the snapshot once.
 
 Still ahead: a cross-machine team backend (TCP + auth).
 

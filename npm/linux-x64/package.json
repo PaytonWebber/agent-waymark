@@ -1,0 +1,23 @@
+{
+  "name": "@agent-waymark/linux-x64",
+  "version": "0.1.5",
+  "description": "agent-waymark native binary for linux-x64",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/agent-waymark"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PaytonWebber/agent-waymark"
+  },
+  "homepage": "https://github.com/PaytonWebber/agent-waymark#readme",
+  "bugs": {
+    "url": "https://github.com/PaytonWebber/agent-waymark/issues"
+  },
+  "license": "MIT"
+}

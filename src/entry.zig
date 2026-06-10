@@ -109,6 +109,12 @@ pub const EntryJson = struct {
 
 pub const Snapshot = struct {
     next_id: u64,
+    /// Identifies the embedding matrix the vectors were produced with (see
+    /// model2vec's Model.fingerprint). Vectors from a different matrix are
+    /// not comparable, even at the same dimension: a quantized rebuild or a
+    /// swapped AGENT_WAYMARK_MODEL_DIR changes the basis. Null in snapshots
+    /// from older builds.
+    embedder_fingerprint: ?u64 = null,
     entries: []const EntryJson,
 };
 

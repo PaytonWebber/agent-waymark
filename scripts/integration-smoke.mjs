@@ -160,6 +160,51 @@ try {
     `hook context missing recorded body: ${JSON.stringify(hook)}`,
   );
 
+  // Real in-process embedding: record without a precomputed vector, then
+  // recall both ways the hybrid ranking is supposed to work. This is the
+  // check that would have caught a miscalibrated relevance floor.
+  const semantic = await rpc(socketPath, {
+    op: "record",
+    kind: "decision",
+    scope,
+    body: "the scheduler retries failed jobs with exponential backoff",
+    text: "the scheduler retries failed jobs with exponential backoff",
+    author: "integration",
+  });
+  assert(semantic.ok, `embedded record failed: ${JSON.stringify(semantic)}`);
+
+  const identifier = await rpc(socketPath, {
+    op: "record",
+    kind: "finding",
+    scope,
+    body: "AGENT_WAYMARK_SOCKET must be set before clients connect",
+    text: "AGENT_WAYMARK_SOCKET must be set before clients connect",
+    author: "integration",
+  });
+  assert(identifier.ok, `embedded record failed: ${JSON.stringify(identifier)}`);
+
+  const paraphrase = await rpc(socketPath, {
+    op: "recall",
+    scope,
+    text: "how does retry backoff work?",
+    limit: 3,
+  });
+  assert(
+    paraphrase.ok && paraphrase.hits?.[0]?.id === semantic.id,
+    `paraphrase recall did not rank the semantic match first: ${JSON.stringify(paraphrase)}`,
+  );
+
+  const exact = await rpc(socketPath, {
+    op: "recall",
+    scope,
+    text: "AGENT_WAYMARK_SOCKET",
+    limit: 3,
+  });
+  assert(
+    exact.ok && exact.hits?.[0]?.id === identifier.id,
+    `identifier recall did not rank the exact match first: ${JSON.stringify(exact)}`,
+  );
+
   await runPreCompactHook(exe, env, tmp);
 } finally {
   if (daemon && daemon.exitCode === null) {

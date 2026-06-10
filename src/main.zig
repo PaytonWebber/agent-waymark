@@ -58,11 +58,7 @@ pub fn main(init: std.process.Init) !void {
     const cfg: daemon.Config = .{
         .socket_path = env.get("AGENT_WAYMARK_SOCKET") orelse default_socket,
         .store_path = env.get("AGENT_WAYMARK_STORE") orelse default_store,
-        .embed = .{
-            .url = env.get("AGENT_WAYMARK_EMBED_URL") orelse embedder.Config.default_url,
-            .model = env.get("AGENT_WAYMARK_EMBED_MODEL") orelse embedder.Config.default_model,
-            .keep_alive = env.get("AGENT_WAYMARK_EMBED_KEEP_ALIVE") orelse embedder.Config.default_keep_alive,
-        },
+        .model_dir = env.get("AGENT_WAYMARK_MODEL_DIR"),
         .extract = .{
             .url = env.get("AGENT_WAYMARK_EXTRACT_URL") orelse extractor.Config.default_url,
             .model = env.get("AGENT_WAYMARK_EXTRACT_MODEL") orelse extractor.Config.default_model,
@@ -430,4 +426,6 @@ test {
     _ = @import("install.zig");
     _ = @import("doctor.zig");
     _ = @import("store_test.zig");
+    _ = @import("lexical.zig");
+    _ = @import("embedder.zig");
 }

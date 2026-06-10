@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const daemon = @import("daemon.zig");
+const embedder = @import("embedder.zig");
 const client_mod = @import("client.zig");
 const scope_mod = @import("scope.zig");
 
@@ -64,6 +65,7 @@ fn collectChecks(a: Allocator, allocator: Allocator, io: std.Io, env: *std.proce
     try checks.append(a, .{ .status = .ok, .name = "socket", .detail = cfg.socket_path });
     try checks.append(a, .{ .status = .ok, .name = "store", .detail = cfg.store_path });
     try checks.append(a, .{ .status = .ok, .name = "scope", .detail = scope });
+    try checks.append(a, try embedderCheck(a, io, cfg));
     const daemon_checks = try daemonCheck(a, allocator, io, cfg);
     try checks.append(a, daemon_checks.daemon);
     if (daemon_checks.store) |store| try checks.append(a, store);
@@ -106,6 +108,34 @@ fn collectChecks(a: Allocator, allocator: Allocator, io: std.Io, env: *std.proce
         "agent-waymark install --codex",
     ));
     return try checks.toOwnedSlice(a);
+}
+
+/// Verify the embedding model the daemon would use. Loading takes ~100ms,
+/// which is what doctor is for; a broken AGENT_WAYMARK_MODEL_DIR or a
+/// dimension mismatch surfaces here instead of as a dead daemon.
+fn embedderCheck(a: Allocator, io: std.Io, cfg: daemon.Config) !Check {
+    var emb = embedder.Embedder.init(a, io, cfg.model_dir) catch |err| {
+        const detail = switch (err) {
+            error.EmbeddingDimMismatch => try std.fmt.allocPrint(
+                a,
+                "model in {s} does not match the built dimension ({d})",
+                .{ cfg.model_dir orelse "(bundled)", embedder.dim },
+            ),
+            else => try std.fmt.allocPrint(
+                a,
+                "could not load embedding model from {s}",
+                .{cfg.model_dir orelse "(bundled)"},
+            ),
+        };
+        return .{ .status = .fail, .name = "embedding", .detail = detail };
+    };
+    defer emb.deinit();
+
+    const detail = if (cfg.model_dir) |dir|
+        try std.fmt.allocPrint(a, "model2vec model from {s} ({d}d)", .{ dir, embedder.dim })
+    else
+        try std.fmt.allocPrint(a, "bundled {s} ({d}d, in-process)", .{ embedder.model_name, embedder.dim });
+    return .{ .status = .ok, .name = "embedding", .detail = detail };
 }
 
 fn daemonCheck(a: Allocator, allocator: Allocator, io: std.Io, cfg: daemon.Config) !DaemonChecks {

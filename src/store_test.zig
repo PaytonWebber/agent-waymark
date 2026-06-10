@@ -66,6 +66,33 @@ test "record then recall ranks the nearest entry first" {
     try testing.expectEqualStrings("about bananas", hits[0].body);
 }
 
+test "recallHybrid lets an exact identifier rescue a dense miss" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The query vector points at the apples entry, but the query text names
+    // an identifier only the darwin entry contains. Fusion must surface the
+    // lexical match despite the dense ranking disagreeing.
+    _ = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "about apples", .embedding = try axisVec(a, 0) });
+    const darwin = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "npm resolves to darwin-arm64", .embedding = try axisVec(a, 1) });
+
+    const hits = try store.recallHybrid(a, "darwin-arm64", try axisVec(a, 0), "", null, 2);
+    try testing.expectEqual(@as(usize, 2), hits.len);
+    try testing.expectEqual(darwin, hits[0].id);
+
+    // Without a lexical match the dense ranking decides, unchanged.
+    const dense_only = try store.recallHybrid(a, "zzz qqq", try axisVec(a, 0), "", null, 2);
+    try testing.expectEqualStrings("about apples", dense_only[0].body);
+}
+
 test "recall filters by scope and kind" {
     const io = testIo();
     cleanup(io);
@@ -209,6 +236,7 @@ test "pinned entry stays in the header regardless of recency" {
 
     var store = try Store.init(testing.allocator, io, test_path);
     defer store.deinit();
+    store.now_override = 1_750_000_000;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

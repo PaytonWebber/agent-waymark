@@ -20,6 +20,7 @@
 const std = @import("std");
 const quantal = @import("quantal");
 const embedder = @import("embedder.zig");
+const lexical = @import("lexical.zig");
 const entry_mod = @import("entry.zig");
 
 const Allocator = std.mem.Allocator;
@@ -69,10 +70,23 @@ pub const Store = struct {
     next_id: u64 = 1,
     prompts_since_write: usize = 0,
     last_nudge_prompt_count: usize = 0,
+    /// Fingerprint of the embedder whose vectors this store holds; null when
+    /// opened without one (tests).
+    embedder_fingerprint: ?u64 = null,
+    /// Test-only fixed clock; see nowSeconds.
+    now_override: ?i64 = null,
 
     /// Open (or create) the store backed by the snapshot at `path`. `path` and
     /// `io` are borrowed and must outlive the store.
     pub fn init(allocator: Allocator, io: std.Io, path: []const u8) !Store {
+        return initWithEmbedder(allocator, io, path, null);
+    }
+
+    /// Like `init`, but snapshots written at a different embedding dimension
+    /// (an older build, a different model) are migrated by re-embedding every
+    /// body instead of failing to load. Embedding is local and takes
+    /// microseconds per entry, so migration is invisible.
+    pub fn initWithEmbedder(allocator: Allocator, io: std.Io, path: []const u8, emb: ?*const embedder.Embedder) !Store {
         const store_path = try std.fs.path.resolve(allocator, &.{path});
         errdefer allocator.free(store_path);
         const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{store_path});
@@ -84,10 +98,11 @@ pub const Store = struct {
             .path = store_path,
             .tmp_path = tmp_path,
             .index = try Index.init(allocator, 200, 0x5EED),
+            .embedder_fingerprint = if (emb) |e| e.fingerprint() else null,
         };
         errdefer store.index.deinit(allocator);
 
-        try store.load();
+        try store.load(emb);
         return store;
     }
 
@@ -417,6 +432,77 @@ pub const Store = struct {
         return hits.items;
     }
 
+    /// Hybrid recall: the dense ranking (paraphrase matching) and a BM25
+    /// ranking over the same candidates (exact identifiers: paths, symbols,
+    /// env var names) fused with reciprocal-rank fusion, so a query matches
+    /// whether it shares meaning or tokens with an entry. Hit scores remain
+    /// cosine similarity so downstream relevance floors keep their meaning;
+    /// fusion only decides the order.
+    pub fn recallHybrid(
+        self: *Store,
+        arena: Allocator,
+        query_text: []const u8,
+        query_vec: []const f32,
+        scope: []const u8,
+        kind: ?EntryKind,
+        limit: usize,
+    ) ![]Hit {
+        if (self.entries.count() == 0 or limit == 0) return &.{};
+
+        const want = @min(self.entries.count(), @max(limit * 8, 64));
+
+        // Dense ranking, filtered the same way recall filters.
+        var ctx = try Index.SearchContext.init(self.allocator, &self.index, @max(want, 64));
+        defer ctx.deinit(self.allocator);
+        const out = try arena.alloc(quantal.SearchResult, want);
+        const n = self.index.search(&ctx, query_vec, out);
+
+        var dense_ids = try std.ArrayList(u64).initCapacity(arena, n);
+        for (out[0..n]) |sr| {
+            const e = self.entries.get(sr.id) orelse continue;
+            if (!eligible(e, scope, kind)) continue;
+            dense_ids.appendAssumeCapacity(sr.id);
+        }
+
+        // Lexical ranking over every eligible entry; the corpus is small
+        // enough that the candidate set is simply all of it.
+        var docs: std.ArrayList(lexical.Doc) = .empty;
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (!eligible(e, scope, kind)) continue;
+            try docs.append(arena, .{ .id = kv.key_ptr.*, .text = e.body });
+        }
+        const lex = try lexical.rank(arena, docs.items, query_text);
+        var lex_ids = try std.ArrayList(u64).initCapacity(arena, @min(lex.len, want));
+        for (lex[0..@min(lex.len, want)]) |s| lex_ids.appendAssumeCapacity(s.id);
+
+        const fused = try lexical.rrf(arena, &.{ dense_ids.items, lex_ids.items });
+
+        var hits = try std.ArrayList(Hit).initCapacity(arena, @min(fused.len, limit));
+        for (fused) |id| {
+            if (hits.items.len >= limit) break;
+            const e = self.entries.get(id) orelse continue;
+            try hits.append(arena, try self.hydrate(arena, cosine(query_vec, e.embedding), e));
+        }
+        return hits.items;
+    }
+
+    fn eligible(e: Entry, scope: []const u8, kind: ?EntryKind) bool {
+        if (!e.isActive()) return false;
+        if (!scopeVisible(e.scope, scope)) return false;
+        if (kind) |k| if (e.kind != k) return false;
+        return true;
+    }
+
+    /// Both vectors are unit length (the embedder normalizes), so the dot
+    /// product is cosine similarity.
+    fn cosine(a: []const f32, b: []const f32) f32 {
+        var sum: f32 = 0;
+        for (a, b) |x, y| sum += x * y;
+        return sum;
+    }
+
     /// Active entries in a scope, newest-first (ids are monotonic), optionally
     /// filtered by kind, hydrated into `arena`. The chronological decision log.
     pub fn timeline(
@@ -550,6 +636,9 @@ pub const Store = struct {
     }
 
     pub fn nowSeconds(self: *Store) i64 {
+        // Tests pin the clock so entry ordering and freshness never depend
+        // on where a wall-clock second boundary happens to fall mid-test.
+        if (self.now_override) |t| return t;
         return std.Io.Timestamp.now(self.io, .real).toSeconds();
     }
 
@@ -560,7 +649,7 @@ pub const Store = struct {
 
     // ---- internals --------------------------------------------------------
 
-    fn load(self: *Store) !void {
+    fn load(self: *Store, emb: ?*const embedder.Embedder) !void {
         const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, self.path, self.allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
@@ -570,8 +659,26 @@ pub const Store = struct {
         const parsed = try std.json.parseFromSlice(Snapshot, self.allocator, bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
+        var reembed_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer reembed_arena.deinit();
+        var migrated = false;
+
+        // The same dimension is not the same basis: a different model, a
+        // quantized rebuild (tq4 in particular), or an older snapshot without
+        // a fingerprint all mean the stored vectors may not be comparable
+        // with new ones, so re-embed everything. Only possible when an
+        // embedder is present; without one (tests) trust matching dims.
+        const stale_basis = emb != null and
+            (parsed.value.embedder_fingerprint == null or
+                parsed.value.embedder_fingerprint.? != self.embedder_fingerprint.?);
+
         for (parsed.value.entries) |r| {
-            if (r.embedding.len != embedder.dim) return error.SnapshotDimMismatch;
+            const embedding: []const f32 = if (r.embedding.len == embedder.dim and !stale_basis)
+                r.embedding
+            else if (emb) |e| blk: {
+                migrated = true;
+                break :blk try e.embed(reembed_arena.allocator(), r.body);
+            } else return error.SnapshotDimMismatch;
             const kind = EntryKind.fromString(r.kind) orelse return error.SnapshotBadKind;
             const ne: NewEntry = .{
                 .kind = kind,
@@ -580,7 +687,7 @@ pub const Store = struct {
                 .refs = r.refs,
                 .author = r.author,
                 .supersedes = r.supersedes,
-                .embedding = r.embedding,
+                .embedding = embedding,
             };
             var e = try self.allocEntry(r.id, ne, r.created_at, r.ref_states);
             e.created_at = r.created_at;
@@ -594,6 +701,9 @@ pub const Store = struct {
             try self.entries.put(self.allocator, r.id, e);
         }
         self.next_id = parsed.value.next_id;
+
+        // Rewrite the snapshot at the new dimension so migration runs once.
+        if (migrated) try self.persist();
     }
 
     fn persist(self: *Store) !void {
@@ -625,7 +735,7 @@ pub const Store = struct {
             };
         }
 
-        const bytes = try std.json.Stringify.valueAlloc(a, Snapshot{ .next_id = self.next_id, .entries = rows }, .{});
+        const bytes = try std.json.Stringify.valueAlloc(a, Snapshot{ .next_id = self.next_id, .embedder_fingerprint = self.embedder_fingerprint, .entries = rows }, .{});
 
         const cwd = std.Io.Dir.cwd();
         try cwd.writeFile(self.io, .{ .sub_path = self.tmp_path, .data = bytes });

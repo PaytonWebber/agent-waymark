@@ -35,11 +35,12 @@ const HookInput = struct {
 const max_transcript_bytes = 24 * 1024;
 
 /// Minimum cosine score for a recall hit to be auto-injected on a prompt.
-/// Embeddings are L2-normalized so scores are comparable across queries: real
-/// matches land ~0.5+, unrelated prompts ~0.35, so this stays silent on
-/// off-topic prompts instead of padding context with noise. Override with
-/// AGENT_WAYMARK_MIN_SCORE.
-const default_min_score: f32 = 0.45;
+/// Embeddings are L2-normalized so scores are comparable across queries.
+/// Calibrated for the bundled static-embedding model, whose cosine spread is
+/// wider than a transformer's: measured relevant paraphrase matches land
+/// 0.20-0.49 and unrelated prompts top out around 0.17, so the floor sits
+/// just above the noise ceiling. Override with AGENT_WAYMARK_MIN_SCORE.
+const default_min_score: f32 = 0.20;
 
 /// Re-surfaced at every SessionStart (and after compaction) so the agent keeps
 /// writing to agent-waymark instead of letting the store go stale. The MCP server's

@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .agent-waymark && AGENT_WAYMARK_SOCKET=\"$PWD/.agent-waymark/agent-waymark.sock\" AGENT_WAYMARK_STORE=\"$PWD/.agent-waymark/agent-waymark-state.json\" exec ./zig-out/bin/agent-waymark hook SessionStart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .agent-waymark && AGENT_WAYMARK_SOCKET=\"$PWD/.agent-waymark/agent-waymark.sock\" AGENT_WAYMARK_STORE=\"$PWD/.agent-waymark/agent-waymark-state.json\" exec ./zig-out/bin/agent-waymark hook UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .agent-waymark && AGENT_WAYMARK_SOCKET=\"$PWD/.agent-waymark/agent-waymark.sock\" AGENT_WAYMARK_STORE=\"$PWD/.agent-waymark/agent-waymark-state.json\" exec ./zig-out/bin/agent-waymark hook SubagentStart"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .agent-waymark && AGENT_WAYMARK_SOCKET=\"$PWD/.agent-waymark/agent-waymark.sock\" AGENT_WAYMARK_STORE=\"$PWD/.agent-waymark/agent-waymark-state.json\" exec ./zig-out/bin/agent-waymark hook PreCompact"
+          }
+        ]
+      }
+    ]
+  }
+}

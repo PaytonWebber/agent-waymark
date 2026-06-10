@@ -52,6 +52,16 @@ jobs:
           }
           NODE
 
+      - uses: actions/cache@v4
+        with:
+          path: src/model
+          key: potion-retrieval-32M-i8-v1
+
+      - name: Fetch and quantize the embedding model
+        run: |
+          ./scripts/fetch-model.sh potion-retrieval-32M
+          zig build quantize-model
+
       - name: Test
         run: zig build test --fetch
 
