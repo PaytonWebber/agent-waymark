@@ -1,10 +1,37 @@
 # Agent Waymark
 
-Durable, shared working-state for agent orchestration. Not another semantic
-memory store. The unit of state is a structured **entry**: a decision, a
-finding, a rejected path, or a todo that one agent, sub-agent, or session leaves
-for the next, so they stop re-discovering and re-deciding what an earlier one
-already worked out.
+**Not another semantic memory store.** Memory tools wait to be asked, which is
+why models rarely use them. Waymark's hooks push prior state into the model
+before it says a word.
+
+Monday's session decides "the daemon owns the store; per-process stores
+corrupt." Tuesday's session re-derives it from scratch, or decides differently.
+Waymark ends that: every new session, prompt, and sub-agent starts with the
+project's standing decisions, findings, and open todos already in context.
+
+```
+-- Tuesday, fresh session: injected before your first message --
+
+## agent-waymark state: repo:your-project
+
+Current truth:
+- #14 [decision, confirmed 2d ago] the daemon owns the store; per-process stores corrupt
+
+Open todos (1):
+- #21 [todo, created 1d ago] wire the hosted backend auth check
+
+-- so when you ask: --
+
+you:   let's add per-session caching to the store
+model: decision #14 ruled out per-process state because it corrupts the
+       store, and a per-session cache reintroduces that. If we want this,
+       we should supersede #14 first.
+```
+
+The unit of state is a structured **entry**: a decision, a finding, a rejected
+path, or a todo that one agent, sub-agent, or session leaves for the next, so
+they stop re-discovering and re-deciding what an earlier one already worked
+out.
 
 ## Why
 
