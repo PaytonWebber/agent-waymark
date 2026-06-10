@@ -519,14 +519,15 @@ test "stateShellCommand uses shared project daemon state" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const root = try std.process.currentPathAlloc(std.testing.io, a);
-    const state_dir = try std.fs.path.join(a, &.{ root, project_state_dir });
+    // projectState resolves the enclosing git repo root (the tmp cwd sits
+    // inside this repo's .zig-cache), so assert against the paths it actually
+    // returned: the contract under test is that stateShellCommand embeds them.
     const state = try projectState(a, std.testing.io);
     const out = try stateShellCommand(a, "/tmp/it's/agent-waymark", "mcp", state);
 
-    const mkdir = try std.fmt.allocPrint(a, "mkdir -p '{s}'", .{state_dir});
-    const socket = try std.fmt.allocPrint(a, "AGENT_WAYMARK_SOCKET='{s}/agent-waymark.sock'", .{state_dir});
-    const store = try std.fmt.allocPrint(a, "AGENT_WAYMARK_STORE='{s}/agent-waymark-state.json'", .{state_dir});
+    const mkdir = try std.fmt.allocPrint(a, "mkdir -p '{s}'", .{state.mkdir_path});
+    const socket = try std.fmt.allocPrint(a, "AGENT_WAYMARK_SOCKET='{s}'", .{state.socket_path});
+    const store = try std.fmt.allocPrint(a, "AGENT_WAYMARK_STORE='{s}'", .{state.store_path});
 
     try std.testing.expect(std.mem.indexOf(u8, out, mkdir) != null);
     try std.testing.expect(std.mem.indexOf(u8, out, socket) != null);
@@ -539,9 +540,11 @@ test "mcpConfigBytes emits Claude JSON with user state by default" {
     defer env.deinit();
     try env.put("HOME", "/tmp/home");
 
-    const a = std.testing.allocator;
+    // mcpConfigBytes allocates intermediates it never frees: arena contract.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const out = try mcpConfigBytes(a, &env, "/tmp/agent-waymark", "claude", .{});
-    defer a.free(out);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
     defer parsed.deinit();
@@ -555,9 +558,11 @@ test "mcpConfigBytes emits Codex TOML with explicit store path" {
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
 
-    const a = std.testing.allocator;
+    // mcpConfigBytes allocates intermediates it never frees: arena contract.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const out = try mcpConfigBytes(a, &env, "/tmp/agent-waymark", "codex", .{ .store_path = "/tmp/waymark/state.json" });
-    defer a.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "[mcp_servers.agent-waymark]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "command = \"sh\"") != null);
@@ -781,9 +786,10 @@ test "project Codex install is idempotent and preserves existing config" {
     defer env.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const root = try std.process.currentPathAlloc(std.testing.io, arena.allocator());
-    const state_dir = try std.fs.path.join(arena.allocator(), &.{ root, project_state_dir });
-    const socket = try std.fmt.allocPrint(arena.allocator(), "AGENT_WAYMARK_SOCKET='{s}/agent-waymark.sock'", .{state_dir});
+    // projectState resolves the enclosing git repo root (the tmp cwd sits
+    // inside this repo's .zig-cache); assert against what it returns.
+    const state = try projectState(arena.allocator(), std.testing.io);
+    const socket = try std.fmt.allocPrint(arena.allocator(), "AGENT_WAYMARK_SOCKET='{s}'", .{state.socket_path});
 
     try installCodex(std.testing.io, &env, arena.allocator(), "/tmp/agent-waymark", .{});
     try installCodex(std.testing.io, &env, arena.allocator(), "/tmp/agent-waymark", .{});

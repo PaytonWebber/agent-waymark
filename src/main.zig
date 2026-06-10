@@ -137,14 +137,15 @@ fn runMcp(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Ma
     var scope_arena = std.heap.ArenaAllocator.init(allocator);
     defer scope_arena.deinit();
     const info = scope_mod.detect(scope_arena.allocator(), io, env, null);
-    var handler: mcp.Handler = .{
+    var bridge: mcp.Bridge = .{
         .client = &client,
         .repo_scope = info.repo_scope,
         .branch_scope = info.branch_scope,
         .worktree_root = info.worktree_root,
         .author = env.get("AGENT_WAYMARK_AUTHOR") orelse "claude-code",
     };
-    var server = sdk.Server(mcp.Handler).init(allocator, &handler, .{
+    var handler = mcp.Tools{ .state = &bridge };
+    var server = sdk.Server(mcp.Tools).init(allocator, &handler, .{
         .server_info = .{ .name = "agent-waymark", .version = version },
         .capabilities = .{ .tools = .{} },
         .instructions =

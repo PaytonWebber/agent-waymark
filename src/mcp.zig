@@ -118,83 +118,16 @@ const HandoffArgs = struct {
     };
 };
 
-pub const Handler = struct {
+/// Connection state and scope defaults shared by every tool handler. The
+/// MCP-facing handler type is `Tools` below, generated from these methods.
+pub const Bridge = struct {
     client: *Client,
     repo_scope: []const u8, // default write level
     branch_scope: []const u8, // reads and branch-local writes
     worktree_root: []const u8,
     author: []const u8,
 
-    pub fn listTools(_: *Handler, _: Allocator) !types.ListToolsResult {
-        return .{
-            .tools = &.{
-                .{
-                    .name = "record",
-                    .description = "Record a decision, finding, rejected path, or todo into shared project state so later sessions and sub-agents don't re-derive it.",
-                    .inputSchema = comptime types.schemaForStruct(RecordArgs),
-                },
-                .{
-                    .name = "recall",
-                    .description = "Search shared project state for entries relevant to a query.",
-                    .inputSchema = comptime types.schemaForStruct(RecallArgs),
-                    .annotations = .{ .readOnlyHint = true },
-                },
-                .{
-                    .name = "timeline",
-                    .description = "List recent project state newest-first (the decision/finding log), for browsing rather than search.",
-                    .inputSchema = comptime types.schemaForStruct(TimelineArgs),
-                    .annotations = .{ .readOnlyHint = true },
-                },
-                .{
-                    .name = "supersede",
-                    .description = "Replace an earlier entry with a new one, preserving the chain (e.g. a decision that changed).",
-                    .inputSchema = comptime types.schemaForStruct(SupersedeArgs),
-                },
-                .{
-                    .name = "done",
-                    .description = "Mark a todo done so it drops out of the session header. Kept for history.",
-                    .inputSchema = comptime types.schemaForStruct(DoneArgs),
-                },
-                .{
-                    .name = "touch",
-                    .description = "Confirm an existing entry is still valid without rewriting it. Use this for old decisions or findings that still hold.",
-                    .inputSchema = comptime types.schemaForStruct(TouchArgs),
-                },
-                .{
-                    .name = "pin",
-                    .description = "Pin a foundational entry so it always appears in the session header, not subject to recency truncation. Use sparingly. Set unpin to remove.",
-                    .inputSchema = comptime types.schemaForStruct(PinArgs),
-                },
-                .{
-                    .name = "refs",
-                    .description = "Maintain file refs on an entry: refresh current hashes, move a ref after a rename, or dismiss an expected stale ref.",
-                    .inputSchema = comptime types.schemaForStruct(RefsArgs),
-                },
-                .{
-                    .name = "handoff",
-                    .description = "Emit a compact next-agent summary grouped by decisions, todos, findings, dead ends, artifacts, and entries needing review.",
-                    .inputSchema = comptime types.schemaForStruct(HandoffArgs),
-                    .annotations = .{ .readOnlyHint = true },
-                },
-            },
-        };
-    }
-
-    pub fn callTool(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        if (std.mem.eql(u8, params.name, "record")) return self.record(a, params);
-        if (std.mem.eql(u8, params.name, "recall")) return self.recall(a, params);
-        if (std.mem.eql(u8, params.name, "timeline")) return self.timeline(a, params);
-        if (std.mem.eql(u8, params.name, "supersede")) return self.supersede(a, params);
-        if (std.mem.eql(u8, params.name, "done")) return self.done(a, params);
-        if (std.mem.eql(u8, params.name, "touch")) return self.touch(a, params);
-        if (std.mem.eql(u8, params.name, "pin")) return self.pin(a, params);
-        if (std.mem.eql(u8, params.name, "refs")) return self.refs(a, params);
-        if (std.mem.eql(u8, params.name, "handoff")) return self.handoff(a, params);
-        return error.ToolNotFound;
-    }
-
-    fn pin(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(PinArgs, a, params.arguments);
+    fn pin(self: *Bridge, a: Allocator, args: PinArgs) !types.CallToolResult {
         if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
         const op: []const u8 = if (args.unpin) "unpin" else "pin";
         const parsed = self.client.call(a, .{ .op = op, .id = @intCast(args.id) }) catch return daemonDown(a);
@@ -203,24 +136,21 @@ pub const Handler = struct {
         return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "{s} #{d}.", .{ verb, args.id }));
     }
 
-    fn done(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(DoneArgs, a, params.arguments);
+    fn done(self: *Bridge, a: Allocator, args: DoneArgs) !types.CallToolResult {
         if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
         const parsed = self.client.call(a, .{ .op = "done", .id = @intCast(args.id) }) catch return daemonDown(a);
         if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "done failed");
         return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "Marked #{d} done.", .{args.id}));
     }
 
-    fn touch(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(TouchArgs, a, params.arguments);
+    fn touch(self: *Bridge, a: Allocator, args: TouchArgs) !types.CallToolResult {
         if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
         const parsed = self.client.call(a, .{ .op = "touch", .id = @intCast(args.id) }) catch return daemonDown(a);
         if (!parsed.value.ok) return types.CallToolResult.err(a, parsed.value.@"error" orelse "touch failed");
         return types.CallToolResult.text(a, try std.fmt.allocPrint(a, "Confirmed #{d} still valid.", .{args.id}));
     }
 
-    fn record(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(RecordArgs, a, params.arguments);
+    fn record(self: *Bridge, a: Allocator, args: RecordArgs) !types.CallToolResult {
         return self.doRecord(a, .{
             .op = "record",
             .kind = args.kind,
@@ -234,8 +164,7 @@ pub const Handler = struct {
         });
     }
 
-    fn supersede(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(SupersedeArgs, a, params.arguments);
+    fn supersede(self: *Bridge, a: Allocator, args: SupersedeArgs) !types.CallToolResult {
         return self.doRecord(a, .{
             .op = "record",
             .kind = args.kind,
@@ -249,8 +178,7 @@ pub const Handler = struct {
         });
     }
 
-    fn refs(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(RefsArgs, a, params.arguments);
+    fn refs(self: *Bridge, a: Allocator, args: RefsArgs) !types.CallToolResult {
         if (args.id < 0) return types.CallToolResult.err(a, "id must be non-negative");
         if (std.mem.eql(u8, args.action, "move")) {
             if (args.ref_name == null or args.new_ref == null) {
@@ -274,8 +202,7 @@ pub const Handler = struct {
         return types.CallToolResult.text(a, parsed.value.text orelse "Updated refs.");
     }
 
-    fn handoff(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(HandoffArgs, a, params.arguments);
+    fn handoff(self: *Bridge, a: Allocator, args: HandoffArgs) !types.CallToolResult {
         const parsed = self.client.call(a, .{
             .op = "handoff",
             .scope = args.scope orelse self.branch_scope,
@@ -285,7 +212,7 @@ pub const Handler = struct {
         return types.CallToolResult.text(a, parsed.value.text orelse "");
     }
 
-    fn doRecord(self: *Handler, a: Allocator, req: Request) !types.CallToolResult {
+    fn doRecord(self: *Bridge, a: Allocator, req: Request) !types.CallToolResult {
         const parsed = self.client.call(a, req) catch return daemonDown(a);
         const resp = parsed.value;
         if (!resp.ok) return types.CallToolResult.err(a, resp.@"error" orelse "record failed");
@@ -300,8 +227,7 @@ pub const Handler = struct {
         return types.CallToolResult.text(a, msg);
     }
 
-    fn recall(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(RecallArgs, a, params.arguments);
+    fn recall(self: *Bridge, a: Allocator, args: RecallArgs) !types.CallToolResult {
         return self.hits(a, .{
             .op = "recall",
             .text = args.query,
@@ -311,8 +237,7 @@ pub const Handler = struct {
         }, true);
     }
 
-    fn timeline(self: *Handler, a: Allocator, params: types.CallToolParams) !types.CallToolResult {
-        const args = try types.parseArgs(TimelineArgs, a, params.arguments);
+    fn timeline(self: *Bridge, a: Allocator, args: TimelineArgs) !types.CallToolResult {
         return self.hits(a, .{
             .op = "timeline",
             .scope = args.scope orelse self.branch_scope,
@@ -321,7 +246,7 @@ pub const Handler = struct {
         }, false);
     }
 
-    fn hits(self: *Handler, a: Allocator, req: Request, show_score: bool) !types.CallToolResult {
+    fn hits(self: *Bridge, a: Allocator, req: Request, show_score: bool) !types.CallToolResult {
         const parsed = self.client.call(a, req) catch return daemonDown(a);
         const resp = parsed.value;
         if (!resp.ok) return types.CallToolResult.err(a, resp.@"error" orelse "query failed");
@@ -333,6 +258,51 @@ pub const Handler = struct {
         return .{ .content = content };
     }
 };
+
+/// The MCP handler type: one declaration per tool. The SDK generates the
+/// schemas (from the Bridge methods' arg structs), the tools/list entries,
+/// name dispatch, and typed argument parsing.
+pub const Tools = mcp.StatefulToolPack(Bridge, .{
+    .record = .{
+        .description = "Record a decision, finding, rejected path, or todo into shared project state so later sessions and sub-agents don't re-derive it.",
+        .handler = Bridge.record,
+    },
+    .recall = .{
+        .description = "Search shared project state for entries relevant to a query.",
+        .handler = Bridge.recall,
+        .annotations = .{ .readOnlyHint = true },
+    },
+    .timeline = .{
+        .description = "List recent project state newest-first (the decision/finding log), for browsing rather than search.",
+        .handler = Bridge.timeline,
+        .annotations = .{ .readOnlyHint = true },
+    },
+    .supersede = .{
+        .description = "Replace an earlier entry with a new one, preserving the chain (e.g. a decision that changed).",
+        .handler = Bridge.supersede,
+    },
+    .done = .{
+        .description = "Mark a todo done so it drops out of the session header. Kept for history.",
+        .handler = Bridge.done,
+    },
+    .touch = .{
+        .description = "Confirm an existing entry is still valid without rewriting it. Use this for old decisions or findings that still hold.",
+        .handler = Bridge.touch,
+    },
+    .pin = .{
+        .description = "Pin a foundational entry so it always appears in the session header, not subject to recency truncation. Use sparingly. Set unpin to remove.",
+        .handler = Bridge.pin,
+    },
+    .refs = .{
+        .description = "Maintain file refs on an entry: refresh current hashes, move a ref after a rename, or dismiss an expected stale ref.",
+        .handler = Bridge.refs,
+    },
+    .handoff = .{
+        .description = "Emit a compact next-agent summary grouped by decisions, todos, findings, dead ends, artifacts, and entries needing review.",
+        .handler = Bridge.handoff,
+        .annotations = .{ .readOnlyHint = true },
+    },
+});
 
 fn formatHit(a: Allocator, h: protocol.HitJson, show_score: bool) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);

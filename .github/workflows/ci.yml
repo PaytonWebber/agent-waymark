@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Format check
+        run: zig fmt --check build.zig src
+
+      - name: Unit tests
+        run: zig build test --fetch
+
+      - name: Integration smoke test
+        run: zig build integration
