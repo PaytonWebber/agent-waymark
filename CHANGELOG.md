@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-06-10)
+
+### Fixed
+
+- `agent-waymark --version` reported 0.1.5: the version string compiled into
+  the binary was not bumped for 0.2.0. The release workflow now verifies the
+  source version against package.json before publishing.
+
 ## 0.2.0 (2026-06-10)
 
 ### Changed
