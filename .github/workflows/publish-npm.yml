@@ -6,7 +6,7 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -18,10 +18,12 @@ jobs:
     name: Build and publish npm packages
     runs-on: ubuntu-latest
     environment: npm
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -47,6 +49,18 @@ jobs:
           for (const [name, version] of Object.entries(pkg.optionalDependencies ?? {})) {
             if (version !== pkg.version) {
               console.error(`${name} is pinned to ${version}, expected ${pkg.version}`);
+              process.exit(1);
+            }
+          }
+          const fs = require("fs");
+          const checks = [
+            ["src/main.zig", /const version = "([^"]+)"/],
+            ["build.zig.zon", /\.version = "([^"]+)"/],
+          ];
+          for (const [file, re] of checks) {
+            const found = fs.readFileSync(file, "utf8").match(re)?.[1];
+            if (found !== pkg.version) {
+              console.error(`${file} has version ${found}, expected ${pkg.version}`);
               process.exit(1);
             }
           }
@@ -120,3 +134,23 @@ jobs:
           fi
           rm -f "$log_file"
           exit 1
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists, skipping"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## " ver " " { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ -s release-notes.md ]; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
