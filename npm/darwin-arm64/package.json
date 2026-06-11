@@ -1,6 +1,6 @@
 {
   "name": "@agent-waymark/darwin-arm64",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "agent-waymark native binary for darwin-arm64",
   "os": [
     "darwin"
