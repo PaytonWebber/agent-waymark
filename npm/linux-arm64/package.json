@@ -1,6 +1,6 @@
 {
   "name": "@agent-waymark/linux-arm64",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "agent-waymark native binary for linux-arm64",
   "os": [
     "linux"

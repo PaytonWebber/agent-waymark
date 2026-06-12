@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3 (2026-06-12)
+
+### Fixed
+
+- A burst of clients hitting a store with no daemon running (several agent
+  sessions opening at once) spawned several daemons that stole the socket
+  path from each other, leaving an orphan. Daemon startup now serializes
+  its probe-and-bind under `<socket>.lock`: exactly one binds, the rest
+  detect it and exit. Measured: a 12-client burst now yields one daemon.
+
 ## 0.4.2 (2026-06-12)
 
 ### Fixed

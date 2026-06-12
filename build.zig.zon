@@ -1,6 +1,6 @@
 .{
     .name = .agent_waymark,
-    .version = "0.4.2",
+    .version = "0.4.3",
     .fingerprint = 0x16aa205d6d6fba62,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
