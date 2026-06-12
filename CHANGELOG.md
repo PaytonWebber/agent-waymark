@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-06-12)
+
+### Changed
+
+- The bundled model is now potion-retrieval-32M in model2vec-zig's 4-bit
+  tq4 format instead of int8. Same 512-d retrieval-tuned embeddings,
+  measured within 0.002 NDCG@10 of f32 on MTEB retrieval; the binary
+  shrinks from ~43 MB to ~31 MB.
+- model2vec-zig updated to 0.2.0, whose zero-copy loading reads the matrix
+  directly from the embedded bytes. Together with tq4, daemon resident
+  memory drops from ~87 MB to ~28 MB measured.
+- Existing stores migrate automatically on first load: the bundled matrix
+  changed, so the daemon re-embeds every entry once (microseconds each) and
+  rewrites the snapshot.
+
 ## 0.2.1 (2026-06-10)
 
 ### Fixed
