@@ -13,8 +13,14 @@ corrupt." Tuesday's session re-derives it from scratch, or decides differently.
 Waymark ends that: every new session, prompt, and sub-agent starts with the
 project's standing decisions, findings, and open todos already in context.
 
+```bash
+# Monday's session records as it works (or the model does, via MCP):
+$ agent-waymark record decision "the daemon owns the store; per-process stores corrupt"
+recorded #14
 ```
--- Tuesday, fresh session: injected before your first message --
+
+```
+# Tuesday, any fresh session or sub-agent, before your first message:
 
 ## agent-waymark state: repo:your-project
 
@@ -23,13 +29,6 @@ Current truth:
 
 Open todos (1):
 - #21 [todo, created 1d ago] wire the hosted backend auth check
-
--- so when you ask: --
-
-you:   let's add per-session caching to the store
-model: decision #14 ruled out per-process state because it corrupts the
-       store, and a per-session cache reintroduces that. If we want this,
-       we should supersede #14 first.
 ```
 
 The unit of state is a structured **entry**: a decision, a finding, a rejected
