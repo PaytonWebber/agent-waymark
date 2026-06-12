@@ -54,7 +54,7 @@ jobs:
           }
           const fs = require("fs");
           const checks = [
-            ["src/main.zig", /const version = "([^"]+)"/],
+            ["src/version.zig", /const version = "([^"]+)"/],
             ["build.zig.zon", /\.version = "([^"]+)"/],
           ];
           for (const [file, re] of checks) {

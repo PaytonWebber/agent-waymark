@@ -350,11 +350,64 @@ pub const Store = struct {
             return out.toOwnedSlice();
         }
 
+        const cleanup = try self.collectCleanup(arena, scope);
+        if (cleanup.len > 0) {
+            try w.writeAll("\nCleanup candidates:\n");
+            for (cleanup) |line| try w.print("- {s}\n", .{line});
+        }
+
         try w.writeAll("\nClose loop:\n");
         try w.writeAll("- Mark finished todos with `done <id>`.\n");
         try w.writeAll("- Confirm durable entries with `touch <id>`.\n");
         try w.writeAll("- Resolve stale file refs with `refs refresh`, `refs move`, or `refs dismiss`.\n");
         return out.toOwnedSlice();
+    }
+
+    /// Hygiene suggestions for the handoff: near-duplicate active entries
+    /// (candidates for supersede) and open todos that a later entry appears
+    /// to address (candidates for done). Suggestions, not verdicts: the
+    /// thresholds are the measured duplicate calibration (~0.85 for
+    /// rewordings) and a looser 0.55 for "a later entry covers this ground".
+    fn collectCleanup(self: *Store, arena: Allocator, scope: []const u8) ![][]const u8 {
+        const max_lines = 5;
+        var lines = try std.ArrayList([]const u8).initCapacity(arena, max_lines);
+
+        var active = try std.ArrayList(*const Entry).initCapacity(arena, self.entries.count());
+        var it = self.entries.valueIterator();
+        while (it.next()) |e| {
+            if (!e.isActive()) continue;
+            if (!scopeVisible(e.scope, scope)) continue;
+            try active.append(arena, e);
+        }
+
+        outer: for (active.items, 0..) |e1, i| {
+            for (active.items[i + 1 ..]) |e2| {
+                if (lines.items.len == max_lines) break :outer;
+                if (e1.embedding.len != e2.embedding.len) continue;
+                const score = cosine(e1.embedding, e2.embedding);
+                if (score >= 0.85) {
+                    try lines.append(arena, try std.fmt.allocPrint(
+                        arena,
+                        "#{d} and #{d} look like duplicates (score {d:.2}); consider `supersede`.",
+                        .{ @min(e1.id, e2.id), @max(e1.id, e2.id), score },
+                    ));
+                } else if (score >= 0.55 and e1.kind != e2.kind and
+                    (e1.kind == .todo or e2.kind == .todo))
+                {
+                    const todo = if (e1.kind == .todo) e1 else e2;
+                    const other = if (e1.kind == .todo) e2 else e1;
+                    // Only a later entry can have addressed the todo; ids
+                    // are monotonic, so id order is creation order.
+                    if (other.id <= todo.id) continue;
+                    try lines.append(arena, try std.fmt.allocPrint(
+                        arena,
+                        "todo #{d} may already be addressed by #{d} ({s}); verify and `done {d}`.",
+                        .{ todo.id, other.id, other.kind.toString(), todo.id },
+                    ));
+                }
+            }
+        }
+        return lines.items;
     }
 
     /// Follow a supersede chain to its current (un-superseded) head.

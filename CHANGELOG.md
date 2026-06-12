@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The daemon stamps its version on every response, and clients replace a
+  daemon from a different version (or one old enough not to report a
+  version) automatically: the stale daemon is asked to shut down, the
+  socket is rebound, and the request is retried against the new daemon.
+  Upgrades now take effect without anyone manually restarting the
+  long-lived daemon. Daemons older than this release do not understand the
+  shutdown request; they keep running but lose the socket path and receive
+  no further connections.
+- `recall` warns when nothing clears the relevance floor ("no strong match
+  (best score 0.08); these results may be unrelated to the query"), in the
+  CLI output and as a leading warning in MCP tool results, so an agent does
+  not treat weak matches as confirmation.
+- `handoff` lists cleanup candidates: active near-duplicate entries
+  (candidates for `supersede`) and open todos that a later entry appears to
+  address (candidates for `done`).
+
 ## 0.3.0 (2026-06-12)
 
 ### Changed

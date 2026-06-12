@@ -18,6 +18,8 @@ const extractor = @import("extractor.zig");
 const entry_mod = @import("entry.zig");
 const store_mod = @import("store.zig");
 const protocol = @import("protocol.zig");
+const client_mod = @import("client.zig");
+const version = @import("version.zig").version;
 
 const Allocator = std.mem.Allocator;
 const Store = store_mod.Store;
@@ -39,6 +41,10 @@ const write_duplicate_threshold: f32 = 0.85;
 /// under the bundled model and distinct entries stay below 0.2. Tunable per
 /// model via AGENT_WAYMARK_SWEEP_DEDUP.
 pub const default_sweep_dedup: f32 = 0.80;
+
+/// Below this cosine, explicit recall results get a "no strong match"
+/// warning. Matches the hook injection floor in hooks.zig.
+const recall_floor: f32 = 0.20;
 
 pub const Config = struct {
     socket_path: []const u8,
@@ -70,6 +76,13 @@ pub fn run(io: std.Io, cfg: Config) !void {
     var store = try Store.initWithEmbedder(allocator, io, cfg.store_path, &emb);
     defer store.deinit();
     var lock: std.Io.RwLock = .init;
+
+    // One daemon owns the store at a time: if a same-version daemon already
+    // serves this socket, yield to it; a different (or pre-versioning) one is
+    // asked to shut down before we take over the socket path.
+    yieldToOrReplaceExisting(allocator, io, cfg.socket_path) catch |err| switch (err) {
+        error.AlreadyServing => return,
+    };
 
     const cwd = std.Io.Dir.cwd();
     cwd.deleteFile(io, cfg.socket_path) catch {}; // clear a stale socket
@@ -124,14 +137,23 @@ fn handleConn(allocator: Allocator, io: std.Io, server: *Server, stream: std.Io.
         const parsed = protocol.readLine(Request, a, &reader.interface) catch |err| switch (err) {
             error.EndOfStream => return, // client closed
             else => {
-                protocol.writeLine(a, &writer.interface, Response.err("malformed request")) catch return;
+                protocol.writeLine(a, &writer.interface, stamped(Response.err("malformed request"))) catch return;
                 continue;
             },
         };
 
+        if (std.mem.eql(u8, parsed.value.op, "shutdown")) {
+            // A newer client (or a newer daemon taking over) asked us to
+            // exit. The snapshot is durable on every write, so exiting
+            // between requests loses nothing; the successor unlinks and
+            // rebinds the socket path.
+            protocol.writeLine(a, &writer.interface, stamped(.{ .ok = true, .text = "shutting down" })) catch {};
+            std.process.exit(0);
+        }
+
         const resp = dispatch(a, io, server, parsed.value) catch |err|
             Response.err(@errorName(err));
-        protocol.writeLine(a, &writer.interface, resp) catch return;
+        protocol.writeLine(a, &writer.interface, stamped(resp)) catch return;
     }
 }
 
@@ -188,7 +210,21 @@ fn dispatch(a: Allocator, io: std.Io, server: *Server, req: Request) !Response {
         lock.lockSharedUncancelable(io);
         defer lock.unlockShared(io);
         const hits = try store.recallHybrid(a, query, vec, req.scope orelse "", optKind(req.kind), req.limit orelse 5);
-        return hitsResponse(a, hits, store.nowSeconds());
+        var resp = try hitsResponse(a, hits, store.nowSeconds());
+        // Same calibration as the hook's injection floor: semantic noise
+        // stays below ~0.17 under the bundled model, real matches start at
+        // ~0.20. The results still return (the query was explicit), but an
+        // agent should not treat them as confirmation.
+        var best: f32 = 0;
+        for (hits) |h| best = @max(best, h.score);
+        if (hits.len > 0 and best < recall_floor) {
+            resp.warning = try std.fmt.allocPrint(
+                a,
+                "no strong match (best score {d:.2}); these results may be unrelated to the query",
+                .{best},
+            );
+        }
+        return resp;
     }
 
     if (std.mem.eql(u8, op, "timeline")) {
@@ -406,4 +442,32 @@ fn embedErr(err: anyerror) Response {
         error.EmbeddingDimMismatch => Response.err("embedding dimension does not match the model"),
         else => Response.err("failed to generate embedding"),
     };
+}
+
+fn stamped(resp: Response) Response {
+    var r = resp;
+    r.version = version;
+    return r;
+}
+
+/// Probe an existing daemon on this socket. A same-version daemon means we
+/// are redundant (error.AlreadyServing); a different or pre-versioning one is
+/// asked to shut down so the store has one owner. Pre-shutdown-op daemons
+/// answer "unknown op" and keep running, but lose the socket path when we
+/// rebind, so they receive no further connections.
+fn yieldToOrReplaceExisting(allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
+    var probe: client_mod.Client = undefined;
+    probe.init(allocator, io, socket_path) catch return; // nothing serving
+    defer probe.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const parsed = probe.call(a, .{ .op = "ping" }) catch return;
+    if (parsed.value.version) |v| {
+        if (std.mem.eql(u8, v, version)) return error.AlreadyServing;
+    }
+    _ = probe.call(a, .{ .op = "shutdown" }) catch {};
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
 }

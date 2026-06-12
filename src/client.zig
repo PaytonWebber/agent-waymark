@@ -6,6 +6,7 @@ const std = @import("std");
 const net = std.Io.net;
 const posix = std.posix;
 const protocol = @import("protocol.zig");
+const version = @import("version.zig").version;
 
 const Allocator = std.mem.Allocator;
 const Request = protocol.Request;
@@ -40,10 +41,14 @@ pub const Client = struct {
     wbuf: []u8,
     reader: net.Stream.Reader,
     writer: net.Stream.Writer,
+    socket_path: []u8,
+    /// Whether this client may spawn or replace daemons. Set by
+    /// connectOrStart; plain init connections (probes, doctor) only observe.
+    can_spawn: bool,
 
     pub fn init(self: *Client, allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
         const stream = try quietConnect(socket_path);
-        try self.finish(allocator, io, stream);
+        try self.finish(allocator, io, stream, socket_path, false);
     }
 
     /// Connect, or spawn the daemon (`<self> daemon`, inheriting our environment
@@ -52,25 +57,21 @@ pub const Client = struct {
     /// starting a daemon by hand.
     pub fn connectOrStart(self: *Client, allocator: Allocator, io: std.Io, socket_path: []const u8) !void {
         if (quietConnect(socket_path)) |stream| {
-            return self.finish(allocator, io, stream);
+            return self.finish(allocator, io, stream, socket_path, true);
         } else |_| {}
 
         try spawnDaemon(allocator, io);
-
-        for (0..connect_retry_count) |_| {
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(connect_retry_delay_ms), .awake) catch {};
-            if (quietConnect(socket_path)) |stream| {
-                return self.finish(allocator, io, stream);
-            } else |_| {}
-        }
-        return error.DaemonUnreachable;
+        const stream = try connectWithRetry(io, socket_path);
+        return self.finish(allocator, io, stream, socket_path, true);
     }
 
-    fn finish(self: *Client, allocator: Allocator, io: std.Io, stream: net.Stream) !void {
+    fn finish(self: *Client, allocator: Allocator, io: std.Io, stream: net.Stream, socket_path: []const u8, can_spawn: bool) !void {
         const rbuf = try allocator.alloc(u8, buffer_size);
         errdefer allocator.free(rbuf);
         const wbuf = try allocator.alloc(u8, buffer_size);
         errdefer allocator.free(wbuf);
+        const path = try allocator.dupe(u8, socket_path);
+        errdefer allocator.free(path);
 
         self.* = .{
             .io = io,
@@ -80,6 +81,8 @@ pub const Client = struct {
             .wbuf = wbuf,
             .reader = stream.reader(io, rbuf),
             .writer = stream.writer(io, wbuf),
+            .socket_path = path,
+            .can_spawn = can_spawn,
         };
     }
 
@@ -87,16 +90,56 @@ pub const Client = struct {
         self.stream.close(self.io);
         self.allocator.free(self.rbuf);
         self.allocator.free(self.wbuf);
+        self.allocator.free(self.socket_path);
         self.* = undefined;
     }
 
     /// Send one request and read one response. The result is parsed into
     /// `arena`; pass an arena allocator and ignore the returned `deinit`.
+    ///
+    /// If the response reveals a daemon from a different version (or one old
+    /// enough not to report a version), the daemon is replaced and the
+    /// request retried once, so upgrades take effect without anyone manually
+    /// restarting the long-lived daemon.
     pub fn call(self: *Client, arena: Allocator, req: Request) !std.json.Parsed(Response) {
+        try protocol.writeLine(arena, &self.writer.interface, req);
+        const resp = try protocol.readLine(Response, arena, &self.reader.interface);
+        if (!self.can_spawn or sameVersion(resp.value.version)) return resp;
+
+        self.replaceDaemon(arena) catch return resp;
         try protocol.writeLine(arena, &self.writer.interface, req);
         return protocol.readLine(Response, arena, &self.reader.interface);
     }
+
+    /// Ask the stale daemon to exit (pre-shutdown-op daemons ignore this and
+    /// merely lose the socket path), unlink the socket, and start a fresh
+    /// daemon from this binary. The snapshot is durable on every write, so
+    /// the handover loses nothing.
+    fn replaceDaemon(self: *Client, arena: Allocator) !void {
+        protocol.writeLine(arena, &self.writer.interface, Request{ .op = "shutdown" }) catch {};
+        self.stream.close(self.io);
+        std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
+
+        try spawnDaemon(self.allocator, self.io);
+        const stream = try connectWithRetry(self.io, self.socket_path);
+        self.stream = stream;
+        self.reader = stream.reader(self.io, self.rbuf);
+        self.writer = stream.writer(self.io, self.wbuf);
+    }
 };
+
+fn sameVersion(daemon_version: ?[]const u8) bool {
+    const v = daemon_version orelse return false;
+    return std.mem.eql(u8, v, version);
+}
+
+fn connectWithRetry(io: std.Io, socket_path: []const u8) !net.Stream {
+    for (0..connect_retry_count) |_| {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(connect_retry_delay_ms), .awake) catch {};
+        if (quietConnect(socket_path)) |stream| return stream else |_| {}
+    }
+    return error.DaemonUnreachable;
+}
 
 // Zig 0.16 logs ECONNREFUSED from Unix connect as Unexpected. Use the syscall
 // layer here so stale daemon sockets stay a normal retryable condition.

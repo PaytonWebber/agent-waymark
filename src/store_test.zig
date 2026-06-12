@@ -516,6 +516,36 @@ test "handoff groups active entries by role" {
     try testing.expect(std.mem.indexOf(u8, handoff, "Close loop:") != null);
 }
 
+test "handoff lists cleanup candidates for duplicates and addressed todos" {
+    const io = testIo();
+    cleanup(io);
+    defer cleanup(io);
+
+    var store = try Store.init(testing.allocator, io, test_path);
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Two decisions on the same axis: cosine 1.0, a duplicate pair.
+    _ = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "daemon owns the store", .embedding = try axisVec(a, 0) });
+    _ = try store.record(.{ .kind = .decision, .scope = "repo:x", .body = "the store is owned by the daemon", .embedding = try axisVec(a, 0) });
+
+    // A todo, then a later finding at cosine 0.8 to it: addressed candidate.
+    _ = try store.record(.{ .kind = .todo, .scope = "repo:x", .body = "fix the socket race", .embedding = try axisVec(a, 1) });
+    const mixed = try a.alloc(f32, dim);
+    @memset(mixed, 0);
+    mixed[1] = 0.8;
+    mixed[2] = 0.6;
+    _ = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "socket race fixed by the accept loop rewrite", .embedding = mixed });
+
+    const handoff = try store.handoff(a, "repo:x", 5);
+    try testing.expect(std.mem.indexOf(u8, handoff, "Cleanup candidates:") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "#1 and #2 look like duplicates") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "todo #3 may already be addressed by #4 (finding)") != null);
+}
+
 test "scopeVisible is hierarchical (repo-wide inherited, branch isolated)" {
     const v = store_mod.scopeVisible;
     const repo = "repo:/p";

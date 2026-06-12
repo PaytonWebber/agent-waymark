@@ -114,6 +114,14 @@ block compaction. Extraction quality scales with
 occasionally record a paraphrase of one already stored), so use a capable
 local model for it.
 
+## Recall confidence
+
+Hook injection only includes hits at or above the relevance floor
+(`AGENT_WAYMARK_MIN_SCORE`, default 0.20). Explicit `recall` always returns
+its results, but when nothing clears the floor the response leads with a
+warning that the matches may be unrelated; treat those results as leads to
+verify, not facts.
+
 ## Latency and migration
 
 The `UserPromptSubmit` hook embeds each prompt before the turn proceeds.
@@ -125,3 +133,10 @@ A store written by an older build with a different embedding dimension or a
 different bundled matrix (the snapshot records the model's fingerprint) is
 migrated automatically: the daemon re-embeds every entry on first load (also
 microseconds each) and rewrites the snapshot once.
+
+The daemon itself is also versioned: clients detect a daemon left running by
+an older install and replace it on the next request, so an upgrade takes
+effect without a manual daemon restart. Daemons from releases before this
+mechanism keep running but lose the socket path and receive no further
+connections; they exit with the next reboot or `pkill -f 'agent-waymark
+daemon'`.

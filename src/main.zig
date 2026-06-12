@@ -36,7 +36,7 @@ const Request = protocol.Request;
 
 const default_socket = "/tmp/agent-waymark.sock";
 const default_store = "agent-waymark-state.json";
-const version = "0.3.0";
+const version = @import("version.zig").version;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;

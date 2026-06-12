@@ -253,8 +253,12 @@ pub const Bridge = struct {
         const rows = resp.hits orelse return types.CallToolResult.text(a, "No matching entries.");
         if (rows.len == 0) return types.CallToolResult.text(a, "No matching entries.");
 
-        const content = try a.alloc(types.Content, rows.len);
-        for (rows, content) |h, *c| c.* = types.Content.text_content(try formatHit(a, h, show_score));
+        const extra: usize = if (resp.warning != null) 1 else 0;
+        const content = try a.alloc(types.Content, rows.len + extra);
+        if (resp.warning) |warning| {
+            content[0] = types.Content.text_content(try std.fmt.allocPrint(a, "Warning: {s}.", .{warning}));
+        }
+        for (rows, content[extra..]) |h, *c| c.* = types.Content.text_content(try formatHit(a, h, show_score));
         return .{ .content = content };
     }
 };

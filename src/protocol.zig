@@ -68,6 +68,10 @@ pub const HitJson = struct {
 
 pub const Response = struct {
     ok: bool,
+    /// The daemon's version, stamped on every response. Clients compare it
+    /// with their own and replace a mismatched (or pre-versioning) daemon so
+    /// upgrades take effect without a manual restart.
+    version: ?[]const u8 = null,
     @"error": ?[]const u8 = null,
     id: ?u64 = null,
     count: ?usize = null,
