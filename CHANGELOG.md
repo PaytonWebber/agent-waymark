@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1 (2026-06-12)
+
+### Fixed
+
+- `handoff` suggested the same todo repeatedly when several later entries
+  scored above the addressed-by threshold; it now suggests each todo once,
+  against its best-scoring match.
+
+### Changed
+
+- The recall tool description and docs now explain hybrid ordering: results
+  are ordered by fused semantic + exact-token relevance, while the score
+  shown is semantic similarity alone, so order can differ from score order.
+
 ## 0.4.0 (2026-06-12)
 
 ### Added
