@@ -8,19 +8,22 @@
 why models rarely use them. Waymark's hooks push prior state into the model
 before it says a word.
 
-Monday's session decides "the daemon owns the store; per-process stores
-corrupt." Tuesday's session re-derives it from scratch, or decides differently.
-Waymark ends that: every new session, prompt, and sub-agent starts with the
-project's standing decisions, findings, and open todos already in context.
+A session decides "the daemon owns the store; per-process stores corrupt."
+Then the context window fills, compaction eats the reasoning, a sub-agent
+spawns blank, or you switch models, and the next turn re-derives the decision
+from scratch, or decides differently. Waymark ends that: every new session,
+prompt, and sub-agent starts with the project's standing decisions, findings,
+and open todos already in context.
 
 ```bash
-# Monday's session records as it works (or the model does, via MCP):
+# the session records as it works (or the model does, via MCP):
 $ agent-waymark record decision "the daemon owns the store; per-process stores corrupt"
 recorded #14
 ```
 
 ```
-# Tuesday, any fresh session or sub-agent, before your first message:
+# after compaction, in a fresh session, or in a new sub-agent,
+# before your first message:
 
 ## agent-waymark state: repo:your-project
 
