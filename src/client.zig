@@ -3,6 +3,7 @@
 //! stable address for the lifetime of the connection.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const net = std.Io.net;
 const posix = std.posix;
 const protocol = @import("protocol.zig");
@@ -97,36 +98,118 @@ pub const Client = struct {
     /// Send one request and read one response. The result is parsed into
     /// `arena`; pass an arena allocator and ignore the returned `deinit`.
     ///
-    /// If the response reveals a daemon from a different version (or one old
-    /// enough not to report a version), the daemon is replaced and the
-    /// request retried once, so upgrades take effect without anyone manually
-    /// restarting the long-lived daemon.
+    /// Spawn-capable clients self-heal. A dead connection (most commonly the
+    /// daemon being replaced under a long-lived MCP bridge after an upgrade)
+    /// is reconnected and the request retried once. A response from a daemon
+    /// of a different version (or one old enough not to report a version)
+    /// triggers a replacement of that daemon before the retry, so upgrades
+    /// take effect without anyone manually restarting anything.
     pub fn call(self: *Client, arena: Allocator, req: Request) !std.json.Parsed(Response) {
-        try protocol.writeLine(arena, &self.writer.interface, req);
-        const resp = try protocol.readLine(Response, arena, &self.reader.interface);
+        const resp = self.send(arena, req) catch |err| {
+            if (!self.can_spawn) return err;
+            try self.reconnect();
+            return self.send(arena, req);
+        };
         if (!self.can_spawn or sameVersion(resp.value.version)) return resp;
 
         self.replaceDaemon(arena) catch return resp;
+        return self.send(arena, req) catch resp;
+    }
+
+    fn send(self: *Client, arena: Allocator, req: Request) !std.json.Parsed(Response) {
         try protocol.writeLine(arena, &self.writer.interface, req);
         return protocol.readLine(Response, arena, &self.reader.interface);
     }
 
-    /// Ask the stale daemon to exit (pre-shutdown-op daemons ignore this and
-    /// merely lose the socket path), unlink the socket, and start a fresh
-    /// daemon from this binary. The snapshot is durable on every write, so
-    /// the handover loses nothing.
-    fn replaceDaemon(self: *Client, arena: Allocator) !void {
-        protocol.writeLine(arena, &self.writer.interface, Request{ .op = "shutdown" }) catch {};
-        self.stream.close(self.io);
-        std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
-
-        try spawnDaemon(self.allocator, self.io);
-        const stream = try connectWithRetry(self.io, self.socket_path);
+    fn attach(self: *Client, stream: net.Stream) void {
         self.stream = stream;
         self.reader = stream.reader(self.io, self.rbuf);
         self.writer = stream.writer(self.io, self.wbuf);
     }
+
+    /// Reconnect after the daemon went away mid-connection: connect straight
+    /// to its successor if one is already serving, otherwise spawn one.
+    fn reconnect(self: *Client) !void {
+        self.stream.close(self.io);
+        if (quietConnect(self.socket_path)) |stream| return self.attach(stream) else |_| {}
+        try spawnDaemon(self.allocator, self.io);
+        self.attach(try connectWithRetry(self.io, self.socket_path));
+    }
+
+    /// Replace a stale daemon. Serialized across processes by a lock file,
+    /// because hooks and the MCP bridge fire together at session start and
+    /// must not race to unlink each other's freshly bound sockets. Under the
+    /// lock: if a current-version daemon already answers, adopt it; otherwise
+    /// ask the stale one to exit (pre-shutdown-op daemons ignore this and
+    /// merely lose the socket path), unlink the socket, and start a fresh
+    /// daemon from this binary. The snapshot is durable on every write, so
+    /// the handover loses nothing.
+    fn replaceDaemon(self: *Client, arena: Allocator) !void {
+        const lock = self.acquireSuccessionLock();
+        defer if (lock) |f| f.close(self.io);
+
+        self.stream.close(self.io);
+        if (quietConnect(self.socket_path)) |stream| {
+            self.attach(stream);
+            if (self.send(arena, .{ .op = "ping" }) catch null) |pong| {
+                if (sameVersion(pong.value.version)) return; // already replaced
+                _ = self.send(arena, .{ .op = "shutdown" }) catch {};
+            }
+            self.stream.close(self.io);
+        } else |_| {}
+
+        terminateDaemonByPidFile(self.allocator, self.io, self.socket_path);
+        std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
+        try spawnDaemon(self.allocator, self.io);
+        self.attach(try connectWithRetry(self.io, self.socket_path));
+    }
+
+    /// Best-effort cross-process mutex around daemon replacement. flock is
+    /// released by the OS if the holder dies, so a crash cannot wedge it.
+    fn acquireSuccessionLock(self: *Client) ?std.Io.File {
+        const path = std.fmt.allocPrint(self.allocator, "{s}.lock", .{self.socket_path}) catch return null;
+        defer self.allocator.free(path);
+        const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = false }) catch return null;
+        flockExclusive(file.handle);
+        return file;
+    }
 };
+
+/// Terminate the daemon recorded in `<socket>.pid`, if it is still alive.
+/// The daemon holds an exclusive flock on its pidfile for its lifetime, so a
+/// grabbable lock means the owner is gone (nothing to kill) and a held lock
+/// means the pid inside is trustworthy enough to SIGTERM. This is what keeps
+/// replaced daemons from accumulating as orphaned processes.
+pub fn terminateDaemonByPidFile(allocator: Allocator, io: std.Io, socket_path: []const u8) void {
+    const path = std.fmt.allocPrint(allocator, "{s}.pid", .{socket_path}) catch return;
+    defer allocator.free(path);
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return;
+    defer file.close(io);
+    if (tryFlockNb(file.handle)) {
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        return;
+    }
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64)) catch return;
+    defer allocator.free(bytes);
+    const pid = std.fmt.parseInt(posix.pid_t, std.mem.trim(u8, bytes, " \r\n\t"), 10) catch return;
+    posix.kill(pid, .TERM) catch return;
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(150), .awake) catch {};
+}
+
+pub fn flockExclusive(fd: posix.fd_t) void {
+    switch (builtin.os.tag) {
+        .linux => _ = std.os.linux.flock(fd, posix.LOCK.EX),
+        else => _ = std.c.flock(fd, posix.LOCK.EX),
+    }
+}
+
+/// Try to take an exclusive lock without blocking; true on success.
+pub fn tryFlockNb(fd: posix.fd_t) bool {
+    switch (builtin.os.tag) {
+        .linux => return posix.errno(std.os.linux.flock(fd, posix.LOCK.EX | posix.LOCK.NB)) == .SUCCESS,
+        else => return std.c.flock(fd, posix.LOCK.EX | posix.LOCK.NB) == 0,
+    }
+}
 
 fn sameVersion(daemon_version: ?[]const u8) bool {
     const v = daemon_version orelse return false;

@@ -143,7 +143,9 @@ microseconds each) and rewrites the snapshot once.
 
 The daemon itself is also versioned: clients detect a daemon left running by
 an older install and replace it on the next request, so an upgrade takes
-effect without a manual daemon restart. Daemons from releases before this
-mechanism keep running but lose the socket path and receive no further
-connections; they exit with the next reboot or `pkill -f 'agent-waymark
-daemon'`.
+effect without a manual daemon restart. Replacement is serialized across
+processes by `<socket>.lock`, the daemon's pid lives in `<socket>.pid`
+(guarded by a held flock so a successor can safely terminate it), and a
+client whose connection dies because the daemon was replaced reconnects and
+retries on the next request. Daemons from releases before 0.4.0 predate all
+of this; clean those up once with `pkill -f 'agent-waymark daemon'`.

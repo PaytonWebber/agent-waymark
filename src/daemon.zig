@@ -94,6 +94,15 @@ pub fn run(io: std.Io, cfg: Config) !void {
         cwd.deleteFile(io, cfg.socket_path) catch {};
     }
 
+    // Record our pid and hold an exclusive flock on the pidfile for the
+    // daemon's lifetime: a successor uses the held lock as proof the pid is
+    // ours and may SIGTERM it, so replaced daemons do not accumulate.
+    const pid_file = writePidFile(allocator, io, cfg.socket_path);
+    defer if (pid_file) |pf| {
+        pf.close(io);
+        deletePidFile(allocator, io, cfg.socket_path);
+    };
+
     var server: Server = .{ .store = &store, .lock = &lock, .listener = &listener, .embedder = &emb, .cfg = cfg };
 
     var group: std.Io.Group = .init;
@@ -470,4 +479,32 @@ fn yieldToOrReplaceExisting(allocator: Allocator, io: std.Io, socket_path: []con
     }
     _ = probe.call(a, .{ .op = "shutdown" }) catch {};
     std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+    client_mod.terminateDaemonByPidFile(allocator, io, socket_path);
+}
+
+fn writePidFile(allocator: Allocator, io: std.Io, socket_path: []const u8) ?std.Io.File {
+    const path = std.fmt.allocPrint(allocator, "{s}.pid", .{socket_path}) catch return null;
+    defer allocator.free(path);
+    var buf: [32]u8 = undefined;
+    const contents = std.fmt.bufPrint(&buf, "{d}\n", .{myPid()}) catch return null;
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = contents }) catch return null;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    if (!client_mod.tryFlockNb(file.handle)) {
+        file.close(io);
+        return null;
+    }
+    return file;
+}
+
+fn deletePidFile(allocator: Allocator, io: std.Io, socket_path: []const u8) void {
+    const path = std.fmt.allocPrint(allocator, "{s}.pid", .{socket_path}) catch return;
+    defer allocator.free(path);
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+fn myPid() std.posix.pid_t {
+    return switch (@import("builtin").os.tag) {
+        .linux => std.os.linux.getpid(),
+        else => std.c.getpid(),
+    };
 }
