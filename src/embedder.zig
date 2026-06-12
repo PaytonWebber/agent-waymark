@@ -1,13 +1,14 @@
 //! Text → embedding via a model2vec model compiled into the binary.
 //!
-//! The bundled model defaults to potion-retrieval-32M quantized to i8
-//! (512d, ~32 MB): static embeddings, so embedding a text is a vocabulary
-//! lookup and a mean. Microseconds per call, works offline, no service to
-//! install, and the retrieval-tuned model matches the old transformer
-//! stack's paraphrase quality on our eval suite. Hybrid recall (lexical +
-//! dense fusion) covers exact identifiers on top.
+//! The bundled model defaults to potion-retrieval-32M quantized to tq4
+//! (512d, ~16 MB; model2vec-zig's 4-bit format, measured within 0.002
+//! NDCG@10 of f32 on MTEB retrieval): static embeddings, so embedding a
+//! text is a vocabulary lookup and a mean. Microseconds per call, works
+//! offline, no service to install, and the retrieval-tuned model matches
+//! the old transformer stack's paraphrase quality on our eval suite.
+//! Hybrid recall (lexical + dense fusion) covers exact identifiers on top.
 //! `zig build -Dmodel=potion-base-8M` bundles the smaller 256d model
-//! instead (~30 MB f32, or ~8 MB after `zig build quantize-model`).
+//! instead (~4 MB after `zig build quantize-model`).
 //!
 //! quantal bakes the vector dimension in at comptime (`build_options.dim`),
 //! so it must match the model; the build derives it from `-Dmodel`.
@@ -28,7 +29,12 @@ pub const dim: usize = build_options.dim;
 pub const model_name = build_options.model_name;
 
 const bundled_tokenizer = @embedFile("model/" ++ model_name ++ "/tokenizer.json");
-const bundled_safetensors = @embedFile("model/" ++ model_name ++ "/model.safetensors");
+
+// Aligned copy of the embedded safetensors: loadFromBytes borrows the matrix
+// straight from these bytes (no heap copy), and the tq4 scales region needs
+// f32 alignment for the zero-copy path. @embedFile alone is 1-aligned.
+const bundled_safetensors_src = @embedFile("model/" ++ model_name ++ "/model.safetensors");
+const bundled_safetensors: [bundled_safetensors_src.len]u8 align(8) = bundled_safetensors_src.*;
 
 pub const Error = error{
     ModelLoadFailed,
@@ -43,7 +49,7 @@ pub const Embedder = struct {
         var model = if (model_dir) |dir|
             m2v.Model.load(gpa, io, dir) catch return error.ModelLoadFailed
         else
-            m2v.Model.loadFromBytes(gpa, bundled_tokenizer, bundled_safetensors, .{}) catch
+            m2v.Model.loadFromBytes(gpa, bundled_tokenizer, &bundled_safetensors, .{}) catch
                 return error.ModelLoadFailed;
         errdefer model.deinit();
 

@@ -73,10 +73,11 @@ Runtime requirements:
 - Node.js 18 or newer for the npm launcher and plugin bundle.
 
 That is the whole list. The embedding model (potion-retrieval-32M, 512-d
-static embeddings quantized to int8, ~32 MB) is compiled into the binary, so
-`record` and `recall` work offline, immediately, with nothing else installed.
-Embedding a text takes a few microseconds in-process, and the daemon idles
-under 90 MB resident.
+static embeddings in model2vec-zig's 4-bit tq4 format, ~16 MB; measured
+within 0.002 NDCG@10 of f32 on MTEB retrieval) is compiled into the binary,
+so `record` and `recall` work offline, immediately, with nothing else
+installed. Embedding a text takes a few microseconds in-process, and the
+daemon runs around 30 MB resident.
 
 Optional, for the `PreCompact` extraction sweep only:
 
@@ -212,7 +213,7 @@ the `additionalContext` output shape verified in current Codex sessions.
 
 ```bash
 ./scripts/fetch-model.sh potion-retrieval-32M  # download the model once (~125 MB)
-zig build quantize-model                       # quantize it to i8 in place (~32 MB)
+zig build quantize-model                       # quantize it to tq4 in place (~16 MB)
 zig build                                      # build the binary (Zig 0.16)
 zig build test                                 # unit tests (offline)
 zig build integration                          # daemon + MCP + hook smoke test (offline)
@@ -377,7 +378,8 @@ Embedding runs in-process against the bundled static-embedding model and takes
 about 4 microseconds, so the hook's end-to-end cost is the unix socket round
 trip: well under a millisecond, with no warm-up and no cold start.
 
-A store written by an older build at a different embedding dimension is
+A store written by an older build with a different embedding dimension or a
+different bundled matrix (the snapshot records the model's fingerprint) is
 migrated automatically: the daemon re-embeds every entry on first load (also
 microseconds each) and rewrites the snapshot once.
 

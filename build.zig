@@ -47,13 +47,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // Quantize the fetched f32 model to i8 in place (4x smaller in the
-    // binary and in daemon memory, ~0.9997 cosine vs f32). Run once after
-    // scripts/fetch-model.sh.
+    // Quantize the fetched f32 model to tq4 in place (8x smaller in the
+    // binary and in daemon memory; measured within 0.002 NDCG@10 of f32 on
+    // MTEB retrieval). Run once after scripts/fetch-model.sh; it needs the
+    // f32 file as input, so re-fetch before re-running.
     const quantize = b.addRunArtifact(m2v.artifact("m2v-quantize"));
+    quantize.addArg("--tq4");
     quantize.addArg(b.fmt("src/model/{s}/model.safetensors", .{model}));
     quantize.addArg(b.fmt("src/model/{s}/model.safetensors", .{model}));
-    b.step("quantize-model", "Quantize the bundled model to i8 in place").dependOn(&quantize.step);
+    b.step("quantize-model", "Quantize the bundled model to tq4 in place").dependOn(&quantize.step);
 
     const integration = b.addSystemCommand(&.{"node"});
     integration.addFileArg(b.path("scripts/integration-smoke.mjs"));

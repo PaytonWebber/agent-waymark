@@ -69,7 +69,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: src/model
-          key: potion-retrieval-32M-i8-v1
+          key: potion-retrieval-32M-tq4-v1
 
       - name: Fetch and quantize the embedding model
         run: |
