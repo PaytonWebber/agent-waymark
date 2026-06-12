@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.2 (2026-06-12)
+
+### Fixed
+
+- Long-lived clients (the MCP bridge holds one connection per session)
+  reported "daemon unreachable" forever once the daemon was replaced
+  underneath them, which the 0.4.0 succession mechanism made routine after
+  upgrades. A dead connection now reconnects (or respawns the daemon) and
+  retries the request once.
+- Concurrent clients racing through daemon replacement at session start
+  (hooks and the MCP bridge fire together) could unlink each other's
+  freshly bound sockets. Replacement is now serialized by a lock file and
+  re-checks under the lock, adopting an already-replaced daemon instead of
+  racing it.
+- Replaced daemons no longer accumulate as orphaned processes: the daemon
+  records its pid in `<socket>.pid` and holds an exclusive flock on it for
+  its lifetime, so a successor can verify the pid is really a live daemon
+  and terminate it. Daemons from releases before 0.4.0 have no pidfile and
+  must be cleaned up once with `pkill -f 'agent-waymark daemon'`.
+
 ## 0.4.1 (2026-06-12)
 
 ### Fixed

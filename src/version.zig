@@ -3,4 +3,4 @@
 //! stamps it on every response so clients can detect a daemon left running
 //! by an older install and replace it.
 
-pub const version = "0.4.1";
+pub const version = "0.4.2";
