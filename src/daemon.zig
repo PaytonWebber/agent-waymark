@@ -77,27 +77,38 @@ pub fn run(io: std.Io, cfg: Config) !void {
     defer store.deinit();
     var lock: std.Io.RwLock = .init;
 
-    // One daemon owns the store at a time: if a same-version daemon already
-    // serves this socket, yield to it; a different (or pre-versioning) one is
-    // asked to shut down before we take over the socket path.
-    yieldToOrReplaceExisting(allocator, io, cfg.socket_path) catch |err| switch (err) {
-        error.AlreadyServing => return,
-    };
-
     const cwd = std.Io.Dir.cwd();
-    cwd.deleteFile(io, cfg.socket_path) catch {}; // clear a stale socket
+    var listener: std.Io.net.Server = undefined;
+    var pid_file: ?std.Io.File = null;
+    {
+        // The probe-and-bind below is serialized across processes: a client
+        // burst with no daemon running spawns several daemons at once, and
+        // unserialized they steal the socket path from each other (delete +
+        // rebind), leaving orphans. Under the lock exactly one binds; the
+        // rest probe a live same-version daemon and yield.
+        const startup_lock = client_mod.acquireSocketLock(allocator, io, cfg.socket_path);
+        defer if (startup_lock) |f| f.close(io);
 
-    const addr = try std.Io.net.UnixAddress.init(cfg.socket_path);
-    var listener = try addr.listen(io, .{});
+        // One daemon owns the store at a time: if a same-version daemon
+        // already serves this socket, yield to it; a different (or
+        // pre-versioning) one is asked to shut down before we take over.
+        yieldToOrReplaceExisting(allocator, io, cfg.socket_path) catch |err| switch (err) {
+            error.AlreadyServing => return,
+        };
+
+        cwd.deleteFile(io, cfg.socket_path) catch {}; // clear a stale socket
+        const addr = try std.Io.net.UnixAddress.init(cfg.socket_path);
+        listener = try addr.listen(io, .{});
+
+        // Record our pid and hold an exclusive flock on the pidfile for the
+        // daemon's lifetime: a successor uses the held lock as proof the pid
+        // is ours and may SIGTERM it, so replaced daemons do not accumulate.
+        pid_file = writePidFile(allocator, io, cfg.socket_path);
+    }
     defer {
         listener.deinit(io);
         cwd.deleteFile(io, cfg.socket_path) catch {};
     }
-
-    // Record our pid and hold an exclusive flock on the pidfile for the
-    // daemon's lifetime: a successor uses the held lock as proof the pid is
-    // ours and may SIGTERM it, so replaced daemons do not accumulate.
-    const pid_file = writePidFile(allocator, io, cfg.socket_path);
     defer if (pid_file) |pf| {
         pf.close(io);
         deletePidFile(allocator, io, cfg.socket_path);

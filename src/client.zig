@@ -145,35 +145,40 @@ pub const Client = struct {
     /// daemon from this binary. The snapshot is durable on every write, so
     /// the handover loses nothing.
     fn replaceDaemon(self: *Client, arena: Allocator) !void {
-        const lock = self.acquireSuccessionLock();
-        defer if (lock) |f| f.close(self.io);
+        {
+            // The lock must be released before spawning: the new daemon
+            // takes the same lock around its own probe-and-bind.
+            const lock = acquireSocketLock(self.allocator, self.io, self.socket_path);
+            defer if (lock) |f| f.close(self.io);
 
-        self.stream.close(self.io);
-        if (quietConnect(self.socket_path)) |stream| {
-            self.attach(stream);
-            if (self.send(arena, .{ .op = "ping" }) catch null) |pong| {
-                if (sameVersion(pong.value.version)) return; // already replaced
-                _ = self.send(arena, .{ .op = "shutdown" }) catch {};
-            }
             self.stream.close(self.io);
-        } else |_| {}
+            if (quietConnect(self.socket_path)) |stream| {
+                self.attach(stream);
+                if (self.send(arena, .{ .op = "ping" }) catch null) |pong| {
+                    if (sameVersion(pong.value.version)) return; // already replaced
+                    _ = self.send(arena, .{ .op = "shutdown" }) catch {};
+                }
+                self.stream.close(self.io);
+            } else |_| {}
 
-        terminateDaemonByPidFile(self.allocator, self.io, self.socket_path);
-        std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
+            terminateDaemonByPidFile(self.allocator, self.io, self.socket_path);
+            std.Io.Dir.cwd().deleteFile(self.io, self.socket_path) catch {};
+        }
         try spawnDaemon(self.allocator, self.io);
         self.attach(try connectWithRetry(self.io, self.socket_path));
     }
-
-    /// Best-effort cross-process mutex around daemon replacement. flock is
-    /// released by the OS if the holder dies, so a crash cannot wedge it.
-    fn acquireSuccessionLock(self: *Client) ?std.Io.File {
-        const path = std.fmt.allocPrint(self.allocator, "{s}.lock", .{self.socket_path}) catch return null;
-        defer self.allocator.free(path);
-        const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = false }) catch return null;
-        flockExclusive(file.handle);
-        return file;
-    }
 };
+
+/// Best-effort cross-process mutex (`<socket>.lock`) serializing daemon
+/// startup and replacement. flock is released by the OS if the holder dies,
+/// so a crash cannot wedge it.
+pub fn acquireSocketLock(allocator: Allocator, io: std.Io, socket_path: []const u8) ?std.Io.File {
+    const path = std.fmt.allocPrint(allocator, "{s}.lock", .{socket_path}) catch return null;
+    defer allocator.free(path);
+    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch return null;
+    flockExclusive(file.handle);
+    return file;
+}
 
 /// Terminate the daemon recorded in `<socket>.pid`, if it is still alive.
 /// The daemon holds an exclusive flock on its pidfile for its lifetime, so a
