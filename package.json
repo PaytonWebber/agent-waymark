@@ -1,6 +1,6 @@
 {
   "name": "agent-waymark",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Durable shared working-state for agent orchestration: an MCP server plus Claude Code and Codex hooks that inject project decisions, findings, and todos so sessions and sub-agents stop re-deriving them.",
   "type": "commonjs",
   "bin": {
@@ -20,10 +20,10 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@agent-waymark/linux-x64": "0.3.0",
-    "@agent-waymark/linux-arm64": "0.3.0",
-    "@agent-waymark/darwin-arm64": "0.3.0",
-    "@agent-waymark/darwin-x64": "0.3.0"
+    "@agent-waymark/linux-x64": "0.4.0",
+    "@agent-waymark/linux-arm64": "0.4.0",
+    "@agent-waymark/darwin-arm64": "0.4.0",
+    "@agent-waymark/darwin-x64": "0.4.0"
   },
   "keywords": [
     "claude",
