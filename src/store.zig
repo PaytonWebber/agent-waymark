@@ -380,6 +380,7 @@ pub const Store = struct {
             try active.append(arena, e);
         }
 
+        // Near-duplicate pairs: candidates for supersede.
         outer: for (active.items, 0..) |e1, i| {
             for (active.items[i + 1 ..]) |e2| {
                 if (lines.items.len == max_lines) break :outer;
@@ -391,20 +392,34 @@ pub const Store = struct {
                         "#{d} and #{d} look like duplicates (score {d:.2}); consider `supersede`.",
                         .{ @min(e1.id, e2.id), @max(e1.id, e2.id), score },
                     ));
-                } else if (score >= 0.55 and e1.kind != e2.kind and
-                    (e1.kind == .todo or e2.kind == .todo))
-                {
-                    const todo = if (e1.kind == .todo) e1 else e2;
-                    const other = if (e1.kind == .todo) e2 else e1;
-                    // Only a later entry can have addressed the todo; ids
-                    // are monotonic, so id order is creation order.
-                    if (other.id <= todo.id) continue;
-                    try lines.append(arena, try std.fmt.allocPrint(
-                        arena,
-                        "todo #{d} may already be addressed by #{d} ({s}); verify and `done {d}`.",
-                        .{ todo.id, other.id, other.kind.toString(), todo.id },
-                    ));
                 }
+            }
+        }
+
+        // At most one suggestion per todo: the best-scoring later entry that
+        // appears to address it. Ids are monotonic, so id order is creation
+        // order.
+        for (active.items) |todo| {
+            if (lines.items.len == max_lines) break;
+            if (todo.kind != .todo) continue;
+            var best: ?*const Entry = null;
+            var best_score: f32 = 0.55;
+            for (active.items) |other| {
+                if (other.kind == .todo or other.id <= todo.id) continue;
+                if (other.embedding.len != todo.embedding.len) continue;
+                const score = cosine(todo.embedding, other.embedding);
+                if (score >= 0.85) continue; // already listed as a duplicate
+                if (score >= best_score) {
+                    best_score = score;
+                    best = other;
+                }
+            }
+            if (best) |other| {
+                try lines.append(arena, try std.fmt.allocPrint(
+                    arena,
+                    "todo #{d} may already be addressed by #{d} ({s}); verify and `done {d}`.",
+                    .{ todo.id, other.id, other.kind.toString(), todo.id },
+                ));
             }
         }
         return lines.items;

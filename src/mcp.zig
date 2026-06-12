@@ -272,7 +272,10 @@ pub const Tools = mcp.StatefulToolPack(Bridge, .{
         .handler = Bridge.record,
     },
     .recall = .{
-        .description = "Search shared project state for entries relevant to a query.",
+        .description = "Search shared project state for entries relevant to a query. " ++
+            "Results are ordered by hybrid relevance (semantic similarity fused with exact-token matching, " ++
+            "so identifiers like file paths and env var names rank even when paraphrase similarity is low); " ++
+            "the score shown is semantic similarity alone, so order can differ from score order.",
         .handler = Bridge.recall,
         .annotations = .{ .readOnlyHint = true },
     },

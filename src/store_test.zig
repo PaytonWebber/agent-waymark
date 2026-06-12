@@ -540,10 +540,22 @@ test "handoff lists cleanup candidates for duplicates and addressed todos" {
     mixed[2] = 0.6;
     _ = try store.record(.{ .kind = .finding, .scope = "repo:x", .body = "socket race fixed by the accept loop rewrite", .embedding = mixed });
 
+    // A second, weaker addressing entry must not produce a second suggestion
+    // for the same todo: only the best match is suggested.
+    const weaker = try a.alloc(f32, dim);
+    @memset(weaker, 0);
+    weaker[1] = 0.6;
+    weaker[3] = 0.8;
+    _ = try store.record(.{ .kind = .artifact, .scope = "repo:x", .body = "PR #99 touches the socket code", .embedding = weaker });
+
     const handoff = try store.handoff(a, "repo:x", 5);
     try testing.expect(std.mem.indexOf(u8, handoff, "Cleanup candidates:") != null);
     try testing.expect(std.mem.indexOf(u8, handoff, "#1 and #2 look like duplicates") != null);
     try testing.expect(std.mem.indexOf(u8, handoff, "todo #3 may already be addressed by #4 (finding)") != null);
+    try testing.expect(std.mem.indexOf(u8, handoff, "addressed by #5") == null);
+    // Exactly one suggestion for todo #3.
+    const first = std.mem.indexOf(u8, handoff, "todo #3 may").?;
+    try testing.expect(std.mem.indexOf(u8, handoff[first + 1 ..], "todo #3 may") == null);
 }
 
 test "scopeVisible is hierarchical (repo-wide inherited, branch isolated)" {

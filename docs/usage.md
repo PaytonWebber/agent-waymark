@@ -114,13 +114,20 @@ block compaction. Extraction quality scales with
 occasionally record a paraphrase of one already stored), so use a capable
 local model for it.
 
-## Recall confidence
+## Recall confidence and ordering
 
 Hook injection only includes hits at or above the relevance floor
 (`AGENT_WAYMARK_MIN_SCORE`, default 0.20). Explicit `recall` always returns
 its results, but when nothing clears the floor the response leads with a
 warning that the matches may be unrelated; treat those results as leads to
 verify, not facts.
+
+Recall ordering is hybrid: a semantic ranking and an exact-token (BM25)
+ranking are fused, so identifiers like file paths and env var names rank
+even when paraphrase similarity is low. The score shown is semantic
+similarity alone, which means results are not always in strictly descending
+score order; an exact-token match can legitimately outrank a higher-scored
+paraphrase.
 
 ## Latency and migration
 
